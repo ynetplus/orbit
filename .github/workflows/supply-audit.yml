@@ -14,7 +14,10 @@
 # `baseline_file` / path inputs.
 #
 # Engine script provenance: see migration-lock-risk.yml's header comment for
-# the `github.workflow_ref` self-checkout mechanism — identical pattern here.
+# the `github.job_workflow_ref` self-checkout mechanism — identical pattern
+# here. (Fixed CR-A079-8 fix-pass-2: was `github.workflow_ref`, which in a
+# `workflow_call` chain resolves to the CALLER's coordinates, not this called
+# workflow's — same bug as migration-lock-risk.yml.)
 #
 # GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
 
@@ -73,7 +76,7 @@ jobs:
       - name: Resolve orbit coordinates (self, pinned SHA)
         id: orbit_ref
         run: |
-          WF_REF="${{ github.workflow_ref }}"
+          WF_REF="${{ github.job_workflow_ref }}"
           REPO="${WF_REF%%/.github/*}"
           REF="${WF_REF##*@}"
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"

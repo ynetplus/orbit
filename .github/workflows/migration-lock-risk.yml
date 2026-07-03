@@ -9,11 +9,22 @@
 # Engine script provenance: this workflow checks out ITS OWN repo (Orbit) at
 # the exact SHA the consumer pinned when it wrote
 # `uses: ynetplus/orbit/.github/workflows/migration-lock-risk.yml@<sha>`.
-# `github.workflow_ref` inside a called reusable workflow identifies the
-# reusable workflow's own coordinates (owner/repo/.github/workflows/file.yml@ref)
-# — the same mechanism that backs OIDC `job_workflow_ref` trust scoping
-# (RN-019 §3) — so the script version always matches the pinned workflow SHA,
-# with no separate ref to keep in sync.
+# `github.job_workflow_ref` inside a called reusable workflow identifies the
+# CALLED reusable workflow's own coordinates
+# (owner/repo/.github/workflows/file.yml@ref) — the same mechanism that backs
+# OIDC `job_workflow_ref` trust scoping (RN-019 §3) — so the script version
+# always matches the pinned workflow SHA, with no separate ref to keep in
+# sync.
+#
+# NOTE (bug fixed here, CR-A079-8 fix-pass-2): `github.workflow_ref` (no
+# `job_` prefix) is the wrong context — in a `workflow_call` chain it always
+# resolves to the TOP-LEVEL/CALLER workflow's coordinates, not this called
+# workflow's. Using it here made every consumer's self-checkout resolve to
+# the CONSUMER's own repo/ref instead of Orbit's pinned SHA, so the engine
+# script was never found (`No such file or directory`) and the job failed on
+# every invocation. `github.job_workflow_ref` is the context that resolves to
+# THIS workflow's own coordinates. Found live via the Onest adoption
+# (CR-A079-10, run 28685289814).
 #
 # GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
 
@@ -46,11 +57,11 @@ jobs:
       - name: Resolve orbit coordinates (self, pinned SHA)
         id: orbit_ref
         run: |
-          WF_REF="${{ github.workflow_ref }}"
+          WF_REF="${{ github.job_workflow_ref }}"
           # format: owner/repo/.github/workflows/file.yml@ref
           REPO="${WF_REF%%/.github/*}"
           REF="${WF_REF##*@}"
-          echo "Resolved orbit repo=$REPO ref=$REF (from github.workflow_ref=$WF_REF)"
+          echo "Resolved orbit repo=$REPO ref=$REF (from github.job_workflow_ref=$WF_REF)"
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
 
