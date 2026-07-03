@@ -177,11 +177,13 @@ here" below).
 Tier 2's *engine* (this repo's `scripts/supply-run.sh` / `scripts/semgrep-run.sh`)
 is product-agnostic; your ruleset files and baseline counts are product data
 and stay in YOUR repo, passed in as paths. The reusable workflow self-checks-out
-this repo at the exact SHA it was invoked at (via `github.job_workflow_ref` —
-the context that resolves to the CALLED reusable workflow's own coordinates;
-`github.workflow_ref` without the `job_` prefix always resolves to the
-top-level CALLER's coordinates instead and must never be used for this) to
-fetch the matching engine script version — no separate ref to keep in sync.
+this repo at the exact SHA it was invoked at, via the `job` context's
+`workflow_repository` / `workflow_sha` fields (GitHub docs: "Contexts" ->
+"job context" — these identify the CALLED reusable workflow's own
+`owner/repo` + exact pinned commit SHA; the top-level `github.workflow_ref`
+always identifies the CALLER's workflow instead and must never be used for
+this) to fetch the matching engine script version — no separate ref to keep
+in sync.
 
 ---
 
