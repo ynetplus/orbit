@@ -1,0 +1,101 @@
+# Orbit's own CI — validates every reusable workflow in this repo.
+#
+# actionlint catches structural YAML/workflow errors (bad `uses:`, undefined
+# contexts, invalid `on:` triggers, shellcheck issues in `run:` blocks).
+# yamllint catches generic YAML style/syntax issues (as an independent,
+# non-GitHub-specific linter — belt-and-suspenders).
+#
+# This is Orbit's PR gate — required before merging any change to a reusable
+# workflow. Branch protection on `main` requires this to pass.
+
+name: Orbit CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orbit-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install actionlint
+        run: |
+          # Pinned to the v1.7.7 tag ref (not `main`) — a mutable branch ref
+          # for a supply-chain-relevant install script defeats the point of
+          # SHA/tag-pinning everything else in this repo.
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint --version
+
+      - name: Run actionlint
+        run: |
+          echo "=============================================================="
+          echo "actionlint — structural validation of every workflow in this repo"
+          echo "(shellcheck sub-linter disabled — matches ynetplus convention,"
+          echo "scripts/pre-push-full-ci.sh 'actionlint -shellcheck='; this gate"
+          echo "is for STRUCTURAL workflow correctness, not shell style nits)"
+          echo "=============================================================="
+          ./actionlint -color -shellcheck= .github/workflows/*.yml
+
+  yamllint:
+    name: yamllint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.11'
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Run yamllint
+        run: |
+          echo "=============================================================="
+          echo "yamllint — generic YAML syntax/style validation"
+          echo "=============================================================="
+          yamllint -c .yamllint.yml .github/workflows/
+
+  reusable-workflow-shape:
+    name: Reusable workflow shape check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Every consumer-facing workflow must declare workflow_call
+        run: |
+          echo "=============================================================="
+          echo "Verifying every reusable workflow declares 'on: workflow_call'"
+          echo "(orbit-ci.yml, self-test.yml, and self-test-red-path.yml are"
+          echo "Orbit's own internal automation, not reusable workflows, and"
+          echo "are excluded from this check)."
+          echo "=============================================================="
+          FAIL=0
+          for f in .github/workflows/*.yml; do
+            base=$(basename "$f")
+            case "$base" in
+              orbit-ci.yml|self-test.yml|self-test-red-path.yml)
+                continue ;;
+            esac
+            if ! grep -q "workflow_call:" "$f"; then
+              echo "❌ $f does not declare 'on: workflow_call:' — not consumable via uses:"
+              FAIL=1
+            else
+              echo "✅ $f"
+            fi
+          done
+          if [ "$FAIL" -ne 0 ]; then
+            exit 1
+          fi

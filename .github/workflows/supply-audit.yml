@@ -1,0 +1,147 @@
+# Orbit — Supply Chain Audit (Tier 2: agnostic engine, per-product baseline)
+#
+# Extracted from ynetplus .github/workflows/security.yml `trivy-supply` job
+# (CR-A078-3) + .github/workflows/supply-pip-audit-nightly.yml (CR-A078-3),
+# behaviorally identical, merged into a single parameterized workflow with a
+# `lane` input (trivy | pip-audit | all) so a consumer can call it in HARD
+# BLOCK mode from a PR gate (lane=trivy, infra-path-gated) AND in WARN mode
+# from a nightly schedule (lane=pip-audit), matching the two ynetplus
+# invocation sites.
+#
+# Tier 2 shape (RN-019 Rubric 1): the SCAN ENGINE (this workflow +
+# scripts/supply-run.sh) is product-agnostic; the baseline files are
+# per-product data that stay in the consumer repo and are passed in via
+# `baseline_file` / path inputs.
+#
+# Engine script provenance: see migration-lock-risk.yml's header comment for
+# the `github.workflow_ref` self-checkout mechanism — identical pattern here.
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — Supply Chain Audit
+
+on:
+  workflow_call:
+    inputs:
+      lane:
+        description: "Which sub-scans to run: trivy | pip-audit | all."
+        type: string
+        default: "all"
+      baseline_file:
+        description: "Committed baseline-count file (in the consumer repo) to diff against."
+        type: string
+        default: "supply/baseline-count.txt"
+      backend_path:
+        description: "Directory trivy fs / pip-audit scan for dependency vulns."
+        type: string
+        default: "backend"
+      infra_path:
+        description: "Directory trivy config scans for IaC misconfigs."
+        type: string
+        default: "infrastructure"
+      requirements_glob:
+        description: "Space-separated list of requirements*.txt files for pip-audit (empty = auto-detect under backend_path)."
+        type: string
+        default: ""
+      trivy_version:
+        description: "Pinned Trivy version."
+        type: string
+        default: "0.71.0"
+      pip_audit_version:
+        description: "Pinned pip-audit pip version."
+        type: string
+        default: "2.7.3"
+      blocking:
+        description: "If true, non-zero new findings fail the job (HARD BLOCK). If false, findings are reported only (WARN)."
+        type: boolean
+        default: true
+    secrets:
+      snyk_token:
+        description: "Optional Snyk token — activates premium Snyk scanning when lane=all."
+        required: false
+
+jobs:
+  supply-scan:
+    name: Supply Chain Audit (lane=${{ inputs.lane }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout consumer repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Resolve orbit coordinates (self, pinned SHA)
+        id: orbit_ref
+        run: |
+          WF_REF="${{ github.workflow_ref }}"
+          REPO="${WF_REF%%/.github/*}"
+          REF="${WF_REF##*@}"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout orbit engine scripts (self, pinned)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ${{ steps.orbit_ref.outputs.repo }}
+          ref: ${{ steps.orbit_ref.outputs.ref }}
+          path: _orbit-engine
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install pip-audit
+        if: inputs.lane == 'all' || inputs.lane == 'pip-audit'
+        env:
+          PIP_AUDIT_VERSION: ${{ inputs.pip_audit_version }}
+        run: pip install "pip-audit==${PIP_AUDIT_VERSION}"
+
+      - name: Install Trivy
+        if: inputs.lane == 'all' || inputs.lane == 'trivy'
+        env:
+          TRIVY_VERSION: ${{ inputs.trivy_version }}
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin "v${TRIVY_VERSION}"
+          trivy --version
+
+      - name: Run supply scan
+        id: supply
+        env:
+          SUPPLY_CI: ${{ inputs.blocking && '1' || '0' }}
+          LANE: ${{ inputs.lane }}
+          BASELINE_FILE: ${{ inputs.baseline_file }}
+          BACKEND_PATH: ${{ inputs.backend_path }}
+          INFRA_PATH: ${{ inputs.infra_path }}
+          REQUIREMENTS_GLOB: ${{ inputs.requirements_glob }}
+          SNYK_TOKEN: ${{ secrets.snyk_token }}
+        run: |
+          echo "=============================================================="
+          echo "Supply Chain Audit — Orbit (lane=$LANE, blocking=${{ inputs.blocking }})"
+          echo "=============================================================="
+          echo ""
+
+          REQ_ARGS=()
+          if [ -n "$REQUIREMENTS_GLOB" ]; then
+            REQ_ARGS=("--requirements-glob" "$REQUIREMENTS_GLOB")
+          fi
+
+          chmod +x _orbit-engine/scripts/supply-run.sh
+          _orbit-engine/scripts/supply-run.sh \
+            --lane "$LANE" \
+            --baseline-file "$BASELINE_FILE" \
+            --backend-path "$BACKEND_PATH" \
+            --infra-path "$INFRA_PATH" \
+            --output-dir .council/supply/ \
+            "${REQ_ARGS[@]}"
+
+          FINDING_COUNT=$(cat .council/supply/baseline-count.txt)
+          echo "finding_count=$FINDING_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload findings artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: supply-chain-findings-${{ inputs.lane }}
+          path: .council/supply/
+          retention-days: 30

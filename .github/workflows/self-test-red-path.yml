@@ -1,0 +1,40 @@
+# Orbit Self-Test — Live QA Proof (RED path)
+#
+# Companion to self-test.yml. This workflow is DISPATCH-ONLY and is EXPECTED
+# to end red — it proves the same two gates correctly BLOCK on a bad fixture,
+# which is the other half of "live fail+pass proof, both directions"
+# (CR-A079-8 QA Scenario 1/2). It is deliberately NOT wired to
+# pull_request/push/schedule so it can never appear as a required or
+# recurring check — a workflow whose successful outcome IS a failed run
+# would be confusing (and actively harmful) as a branch-protection context
+# or a nightly cron alert.
+#
+# How to run + verify:
+#   gh workflow run self-test-red-path.yml --repo ynetplus/orbit --ref main
+#   gh run list --repo ynetplus/orbit --workflow=self-test-red-path.yml --limit 1
+#   gh run view <run-id> --repo ynetplus/orbit --json conclusion,jobs
+#
+# Expected: overall run conclusion = failure; both jobs' conclusion = failure.
+# If either job comes back `success`, the corresponding reusable workflow has
+# a real bug (it failed to catch what its GATE-EVIDENCE.md row claims).
+#
+# Fixture provenance: see self-test.yml's header comment (shared fixtures).
+
+name: Orbit Self-Test (Live QA Proof — RED path, dispatch-only)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  # ---- secret-detection: RED (fixture finding NOT in baseline) ----
+  secret-detection-fail:
+    uses: ./.github/workflows/secret-detection.yml
+    with:
+      baseline_path: self-test/fixtures/secrets/empty.secrets.baseline
+      base_ref: self-test/base
+
+  # ---- alembic-single-head: RED (2 heads) ----
+  alembic-single-head-fail:
+    uses: ./.github/workflows/alembic-single-head.yml
+    with:
+      alembic_dir: self-test/fixtures/alembic-conflict

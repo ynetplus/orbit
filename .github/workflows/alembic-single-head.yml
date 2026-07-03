@@ -1,0 +1,105 @@
+# Orbit — Alembic Single Head Check (HARD BLOCK)
+#
+# Extracted from ynetplus .github/workflows/ci.yml `migration-standard` job's
+# "HARD BLOCK - Alembic Single Head Check" step, behaviorally identical:
+# runs `alembic heads` and hard-blocks when more than one head revision
+# exists (a migration branch conflict that would silently drop one branch's
+# migrations at deploy time).
+#
+# This gate only needs to PARSE the migration graph — no live database
+# connection is required for `alembic heads` (only `alembic upgrade`/
+# `alembic current` need a DB). If your `alembic/env.py` imports project
+# modules with third-party dependencies, pass `requirements_file` so those
+# imports succeed.
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — Alembic Single Head Check
+
+on:
+  workflow_call:
+    inputs:
+      alembic_dir:
+        description: "Directory containing alembic.ini (working directory for the alembic CLI)."
+        type: string
+        default: "backend"
+      requirements_file:
+        description: "Optional path to a requirements.txt to install before running `alembic heads` (needed if env.py imports project modules)."
+        type: string
+        default: ""
+      python_version:
+        description: "Python version for the alembic CLI."
+        type: string
+        default: "3.11"
+
+jobs:
+  single-head:
+    name: Alembic Single Head Check (HARD BLOCK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install Alembic dependencies
+        env:
+          REQUIREMENTS_FILE: ${{ inputs.requirements_file }}
+        run: |
+          pip install alembic psycopg2-binary sqlalchemy
+          if [ -n "$REQUIREMENTS_FILE" ] && [ -f "$REQUIREMENTS_FILE" ]; then
+            pip install -r "$REQUIREMENTS_FILE"
+          fi
+
+      - name: HARD BLOCK - Alembic Single Head Check
+        working-directory: ${{ inputs.alembic_dir }}
+        run: |
+          echo "=============================================================="
+          echo "🔒 ALEMBIC SINGLE HEAD CHECK (HARD BLOCK — Orbit)"
+          echo "=============================================================="
+          echo ""
+          echo "Verifying no migration branch conflicts exist..."
+          echo ""
+
+          HEADS_OUTPUT=$(alembic heads 2>&1 || echo "ERROR")
+
+          if echo "$HEADS_OUTPUT" | grep -q "ERROR\|error\|Error"; then
+            echo "❌ Could not run 'alembic heads' — treating as a hard failure."
+            echo ""
+            echo "Output: $HEADS_OUTPUT"
+            echo ""
+            echo "If this is a missing-DB-connection error, note that 'alembic heads'"
+            echo "only parses the migration graph and should NOT require a live DB."
+            echo "Check alembic/env.py for an unconditional DB connection at import time."
+            exit 1
+          fi
+
+          HEAD_COUNT=$(echo "$HEADS_OUTPUT" | grep -cE "^[a-f0-9]+" || echo "0")
+
+          echo "Alembic heads output:"
+          echo "$HEADS_OUTPUT"
+          echo ""
+          echo "Head count: $HEAD_COUNT"
+          echo ""
+
+          if [ "$HEAD_COUNT" -gt 1 ]; then
+            echo "❌ BLOCKED: Multiple Alembic heads detected!"
+            echo ""
+            echo "=============================================================="
+            echo "📋 MIGRATION BRANCHES"
+            echo "=============================================================="
+            echo "$HEADS_OUTPUT"
+            echo ""
+            echo "=============================================================="
+            echo "🛠️ FIX: Merge the branches with:"
+            echo ""
+            echo "   cd ${{ inputs.alembic_dir }}"
+            echo "   alembic merge heads -m 'merge migration branches'"
+            echo ""
+            echo "=============================================================="
+            exit 1
+          fi
+
+          echo "✅ ALEMBIC SINGLE HEAD CHECK PASSED"
+          echo "   Single head revision confirmed."

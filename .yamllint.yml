@@ -1,0 +1,17 @@
+# yamllint config for Orbit's own workflow files.
+# Relaxed line-length and comments rules — GitHub Actions YAML commonly runs
+# long (embedded shell/JS scripts) and dense comment headers are house style.
+extends: default
+
+rules:
+  line-length: disable
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  truthy:
+    # GitHub Actions uses bare `on:` (not quoted) — yamllint's default
+    # truthy check flags `on` as an ambiguous boolean-like scalar key.
+    check-keys: false
+  document-start: disable
+  braces:
+    max-spaces-inside: 1

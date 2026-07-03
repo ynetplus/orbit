@@ -1,0 +1,61 @@
+# Orbit — Enforce Branch Flow
+#
+# Extracted from ynetplus .github/workflows/gate-stage-to-main.yml
+# `enforce-stage-to-main` job, behaviorally identical (generalized from the
+# hardcoded stage/main pair to caller-supplied `allowed_source`/`protected_target`).
+# Blocks any PR into `protected_target` whose source branch is not
+# `allowed_source` — enforces a single, linear promotion pipeline
+# (e.g. feature branches must land on stage first; only stage can PR to main).
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — Enforce Branch Flow
+
+on:
+  workflow_call:
+    inputs:
+      allowed_source:
+        description: "The only branch permitted to open a PR into protected_target."
+        type: string
+        default: "stage"
+      protected_target:
+        description: "The protected target branch."
+        type: string
+        default: "main"
+
+jobs:
+  enforce:
+    name: Enforce Branch Flow
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR Source Branch
+        env:
+          ALLOWED_SOURCE: ${{ inputs.allowed_source }}
+          PROTECTED_TARGET: ${{ inputs.protected_target }}
+          # Untrusted PR-controlled values — passed via env, never interpolated
+          # directly into the script body (avoids script-injection).
+          SOURCE_BRANCH: ${{ github.head_ref }}
+          TARGET_BRANCH: ${{ github.base_ref }}
+        run: |
+          echo "📋 PR Details:"
+          echo "  Source: $SOURCE_BRANCH"
+          echo "  Target: $TARGET_BRANCH"
+          echo "  Allowed source for '$PROTECTED_TARGET': $ALLOWED_SOURCE"
+          echo ""
+
+          if [ "$TARGET_BRANCH" = "$PROTECTED_TARGET" ] && [ "$SOURCE_BRANCH" != "$ALLOWED_SOURCE" ]; then
+            echo "❌ BRANCH FLOW VIOLATION"
+            echo ""
+            echo "This PR attempts to merge from '$SOURCE_BRANCH' into '$PROTECTED_TARGET'."
+            echo ""
+            echo "🔒 RULE: Only '$ALLOWED_SOURCE' can PR into '$PROTECTED_TARGET'."
+            echo ""
+            echo "✅ Correct Flow:"
+            echo "  1. Merge your branch into '$ALLOWED_SOURCE' first"
+            echo "  2. Verify there"
+            echo "  3. Create a PR from '$ALLOWED_SOURCE' to '$PROTECTED_TARGET'"
+            echo ""
+            exit 1
+          fi
+
+          echo "✅ Branch flow check passed: $SOURCE_BRANCH → $TARGET_BRANCH"

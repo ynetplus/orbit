@@ -1,0 +1,139 @@
+# Orbit — Branch Protection Drift Check
+#
+# Extracted from ynetplus .github/workflows/branch-protection-drift-check.yml
+# (CR-A079-6), behaviorally identical. Required branch-protection contexts
+# are external repo config, not code — nothing else in a repo enforces they
+# stay correct. This workflow queries live branch-protection state on a
+# schedule and fails loudly the moment it drifts from the caller's expected
+# contexts map.
+#
+# Detection only: this workflow never mutates branch protection.
+#
+# TOKEN NOTE: GitHub's branch-protection `required_status_checks` endpoint
+# requires the "Administration" repository permission, which the automatic
+# GITHUB_TOKEN can never be granted. Provide
+# `secrets.branch_protection_readonly_token` (a fine-grained PAT scoped to
+# the consumer repo only, "Administration: Read-only", nothing else) via
+# `secrets: inherit` or an explicit `secrets:` block on the caller's `uses:`.
+# Until provisioned, this job fails with an auth error — that is a
+# credential-provisioning gap, NOT branch-protection drift (the log output
+# labels the two failure modes distinctly).
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — Branch Protection Drift Check
+
+on:
+  workflow_call:
+    inputs:
+      expected_contexts:
+        description: >
+          JSON object mapping branch name -> comma-separated expected required
+          status-check contexts, e.g.
+          '{"main":"CI Gate,Security Gate,Enforce Stage → Main Pipeline","stage":"CI Gate,Security Gate"}'.
+        type: string
+    secrets:
+      branch_protection_readonly_token:
+        description: "Fine-grained PAT scoped to this repo, Administration: Read-only. Falls back to github.token (which will auth-fail — see TOKEN NOTE)."
+        required: false
+
+jobs:
+  drift-check:
+    name: Verify required branch-protection contexts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Assert required contexts match the expected contract
+        env:
+          GH_TOKEN: ${{ secrets.branch_protection_readonly_token || github.token }}
+          REPO: ${{ github.repository }}
+          EXPECTED_JSON: ${{ inputs.expected_contexts }}
+        run: |
+          set -euo pipefail
+
+          FAIL=0
+
+          check_branch() {
+            local branch="$1"
+            local expected_csv="$2"
+
+            echo "=== Checking branch: ${branch} ==="
+
+            local raw
+            if ! raw="$(gh api "repos/${REPO}/branches/${branch}/protection/required_status_checks" 2>&1)"; then
+              if echo "${raw}" | grep -qiE 'Resource not accessible|Bad credentials|HTTP 401|HTTP 403'; then
+                echo "🔑 AUTH/PERMISSION ERROR (not branch-protection drift) fetching '${branch}':"
+                echo "${raw}"
+                echo ""
+                echo "The token this job is running with lacks 'Administration: Read-only'."
+                echo "Provision secrets.branch_protection_readonly_token (fine-grained PAT,"
+                echo "repo-scoped, Administration: Read-only, nothing else) — see the TOKEN"
+                echo "NOTE at the top of this workflow file."
+              else
+                echo "❌ FAILED to fetch required_status_checks for '${branch}':"
+                echo "${raw}"
+              fi
+              FAIL=1
+              echo ""
+              return
+            fi
+
+            local actual_sorted expected_sorted
+            actual_sorted="$(echo "${raw}" | jq -r '.contexts[]' | sort)"
+            expected_sorted="$(echo "${expected_csv}" | tr ',' '\n' | sort)"
+
+            echo "Expected contexts:"
+            echo "${expected_sorted}" | awk '{print "  - " $0}'
+            echo "Actual contexts:"
+            echo "${actual_sorted}" | awk '{print "  - " $0}'
+
+            if [ "${actual_sorted}" != "${expected_sorted}" ]; then
+              echo ""
+              echo "❌ DRIFT DETECTED on branch '${branch}'"
+
+              local missing extra
+              missing="$(comm -23 <(echo "${expected_sorted}") <(echo "${actual_sorted}") || true)"
+              extra="$(comm -13 <(echo "${expected_sorted}") <(echo "${actual_sorted}") || true)"
+
+              if [ -n "${missing}" ]; then
+                echo "  MISSING (expected, not currently required):"
+                echo "${missing}" | awk '{print "    - " $0}'
+              fi
+              if [ -n "${extra}" ]; then
+                echo "  EXTRA (currently required, not expected):"
+                echo "${extra}" | awk '{print "    - " $0}'
+              fi
+
+              FAIL=1
+            else
+              echo "✅ '${branch}' matches the expected contract exactly."
+            fi
+            echo ""
+          }
+
+          if [ -z "$EXPECTED_JSON" ]; then
+            echo "❌ No 'expected_contexts' input provided — nothing to check."
+            exit 1
+          fi
+
+          BRANCHES=$(echo "$EXPECTED_JSON" | python3 -c "import json,sys; print('\n'.join(json.load(sys.stdin).keys()))")
+
+          for branch in $BRANCHES; do
+            expected_csv=$(echo "$EXPECTED_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['$branch'])")
+            check_branch "$branch" "$expected_csv"
+          done
+
+          if [ "${FAIL}" -ne 0 ]; then
+            echo "=============================================================="
+            echo "🔴 BRANCH PROTECTION DRIFT CHECK FAILED"
+            echo ""
+            echo "Either (a) a real required-status-check context has drifted away"
+            echo "from the expected contract, or (b) this job's token lacks the"
+            echo "'Administration: Read-only' permission needed to check at all"
+            echo "(see the per-branch log above — the two cases are labeled distinctly)."
+            echo "=============================================================="
+            exit 1
+          fi
+
+          echo "✅ Branch protection drift check passed — all branches match the expected contract."

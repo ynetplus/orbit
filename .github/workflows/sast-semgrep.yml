@@ -1,0 +1,142 @@
+# Orbit — Semgrep SAST (Tier 2: agnostic engine, per-product rules)
+#
+# Extracted from ynetplus .github/workflows/ci.yml `sast-semgrep` job
+# (CR-A055-1, moved to security.yml in CR-A079-3), behaviorally identical:
+# runs the consumer's own Semgrep ruleset, WARN-on-existing /
+# HARD-BLOCK-on-NEW (diffed against a committed baseline count), uploads
+# SARIF to GitHub Code Scanning.
+#
+# Tier 2 shape (RN-019 Rubric 1): the SCAN ENGINE (this workflow +
+# scripts/semgrep-run.sh) is product-agnostic; the RULESET + baseline are
+# per-product data that stay in the consumer repo and are passed in via
+# `rules_dir` / `baseline_file` inputs.
+#
+# Engine script provenance: see migration-lock-risk.yml's header comment for
+# the `github.workflow_ref` self-checkout mechanism — identical pattern here.
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — Semgrep SAST
+
+on:
+  workflow_call:
+    inputs:
+      rules_dir:
+        description: "Path (in the consumer repo) to the Semgrep ruleset directory."
+        type: string
+        default: "semgrep/canon"
+      scan_path:
+        description: "Directory tree to scan."
+        type: string
+        default: "backend/"
+      baseline_file:
+        description: "Committed baseline-count file to diff against (default: <rules_dir>/baseline-count.txt)."
+        type: string
+        default: ""
+      semgrep_version:
+        description: "Pinned semgrep pip version."
+        type: string
+        default: "1.65.0"
+      upload_sarif:
+        description: "Upload findings to GitHub Code Scanning as SARIF (requires security-events: write on the caller)."
+        type: boolean
+        default: true
+
+jobs:
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read   # required by github/codeql-action/upload-sarif's telemetry call
+    steps:
+      - name: Checkout consumer repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Resolve orbit coordinates (self, pinned SHA)
+        id: orbit_ref
+        run: |
+          WF_REF="${{ github.workflow_ref }}"
+          REPO="${WF_REF%%/.github/*}"
+          REF="${WF_REF##*@}"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout orbit engine scripts (self, pinned)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ${{ steps.orbit_ref.outputs.repo }}
+          ref: ${{ steps.orbit_ref.outputs.ref }}
+          path: _orbit-engine
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Semgrep
+        env:
+          SEMGREP_VERSION: ${{ inputs.semgrep_version }}
+        run: pip install "semgrep==${SEMGREP_VERSION}"
+
+      - name: Run ruleset (WARN-on-existing / HARD-BLOCK-on-NEW)
+        id: semgrep
+        env:
+          RULES_DIR: ${{ inputs.rules_dir }}
+          SCAN_PATH: ${{ inputs.scan_path }}
+          BASELINE_FILE: ${{ inputs.baseline_file }}
+        run: |
+          echo "=============================================================="
+          echo "Semgrep SAST — Orbit"
+          echo "Rules: $RULES_DIR | Scan: $SCAN_PATH"
+          echo "=============================================================="
+          echo ""
+
+          BASELINE_ARGS=()
+          if [ -n "$BASELINE_FILE" ]; then
+            BASELINE_ARGS=("--baseline-file" "$BASELINE_FILE")
+          fi
+
+          chmod +x _orbit-engine/scripts/semgrep-run.sh
+          SEMGREP_CI=1 _orbit-engine/scripts/semgrep-run.sh \
+            --mode full \
+            --rules-dir "$RULES_DIR" \
+            --scan-path "$SCAN_PATH" \
+            --output-dir .council/semgrep/ \
+            "${BASELINE_ARGS[@]}"
+
+          FINDING_COUNT=$(cat .council/semgrep/baseline-count.txt)
+          echo "finding_count=$FINDING_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SARIF output
+        if: always() && inputs.upload_sarif
+        env:
+          RULES_DIR: ${{ inputs.rules_dir }}
+          SCAN_PATH: ${{ inputs.scan_path }}
+        run: |
+          echo "Generating SARIF for Code Scanning upload..."
+          semgrep scan \
+            --config "$RULES_DIR" \
+            --sarif \
+            --output semgrep-results.sarif \
+            "$SCAN_PATH" \
+            || true   # hard block already handled above; this step is upload-only
+          echo "SARIF: $(wc -c < semgrep-results.sarif) bytes"
+
+      - name: Upload SARIF to Code Scanning
+        if: always() && inputs.upload_sarif
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4.36.2
+        with:
+          sarif_file: semgrep-results.sarif
+          category: orbit-semgrep
+
+      - name: Upload findings artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: semgrep-findings
+          path: .council/semgrep/
+          retention-days: 30

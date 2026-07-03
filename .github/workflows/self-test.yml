@@ -1,0 +1,67 @@
+# Orbit Self-Test — Live QA Proof (GREEN path)
+#
+# This is Orbit's own regression suite: it calls Orbit's reusable workflows
+# against committed "clean" fixtures under self-test/fixtures/ and asserts
+# each gate stays GREEN. This workflow is itself a normal required-check
+# candidate (it is SUPPOSED to stay green) — the matching RED-path proof
+# (each gate correctly turns red on a bad fixture) lives in the separate
+# `self-test-red-path.yml`, dispatch-only, because a reusable-workflow
+# `uses:` job cannot carry `continue-on-error:` (GitHub Actions restriction —
+# only `name`/`uses`/`with`/`secrets`/`needs`/`if`/`permissions` are legal
+# keys on that job shape), so a job that's SUPPOSED to fail cannot be safely
+# folded into a workflow run that also needs to report a clean, blockable
+# green/red signal for other jobs in the same run.
+#
+# Fixture provenance:
+#   - self-test/fixtures/secrets/injected.txt — a well-known AWS
+#     documentation EXAMPLE credential (never a real secret), committed on
+#     `main` AFTER the `self-test/base` branch point. secret-detection.yml's
+#     incremental scan diffs base_ref..HEAD, so relative to `self-test/base`
+#     this file always appears "newly added" regardless of how far `main`
+#     has advanced since.
+#       - known.secrets.baseline already contains this exact finding → PASS (this workflow).
+#       - empty.secrets.baseline does not → FAIL (self-test-red-path.yml).
+#   - self-test/fixtures/alembic-{ok,conflict}/ — static Alembic version
+#     trees (1 head / 2 heads). alembic-single-head.yml doesn't diff
+#     anything — it just runs `alembic heads` in the given `alembic_dir` —
+#     so both fixtures live side-by-side in every commit with no branch
+#     tricks needed; ok is tested here, conflict is tested in the red-path
+#     workflow.
+#
+# actionlint's malformed-YAML catch (QA Scenario 3) is proven by orbit-ci.yml
+# itself on every PR that touches a workflow file — a live one-off PR with a
+# deliberately malformed workflow YAML (opened and closed without merging)
+# is the standing proof for that scenario; see docs/GATE-EVIDENCE.md.
+
+name: Orbit Self-Test (Live QA Proof — GREEN path)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 5 * * *'   # nightly regression proof that the reusable workflows still behave
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/**'
+      - 'self-test/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/**'
+      - 'self-test/**'
+
+jobs:
+  # ---- secret-detection: GREEN (fixture finding already in baseline) ----
+  secret-detection-pass:
+    uses: ./.github/workflows/secret-detection.yml
+    with:
+      baseline_path: self-test/fixtures/secrets/known.secrets.baseline
+      base_ref: self-test/base
+
+  # ---- alembic-single-head: GREEN (1 head) ----
+  alembic-single-head-pass:
+    uses: ./.github/workflows/alembic-single-head.yml
+    with:
+      alembic_dir: self-test/fixtures/alembic-ok

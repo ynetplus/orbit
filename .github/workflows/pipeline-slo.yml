@@ -1,0 +1,252 @@
+# Orbit — Pipeline SLO Watchdog
+#
+# Extracted from ynetplus .github/workflows/pipeline-slo.yml (CR-A078-18),
+# behaviorally identical. Evaluates 3 SLOs over the last N completed runs of
+# a watched workflow:
+#   1. Build duration p95 < threshold  (updated_at - run_started_at)
+#   2. Success rate >= threshold        (success / (success + failure))
+#   3. Queue-wait p95 < threshold       (run_started_at - created_at)
+#
+# On >= 1 breach -> creates/comments one [pipeline-slo] issue (idempotent).
+# On 0 breaches  -> closes any open [pipeline-slo] issue (recovery path).
+# n < min_sample -> logs insufficient sample, takes no issue action.
+#
+# Permissions: least-privilege — read repo/actions, write issues only.
+# Token: built-in GITHUB_TOKEN only. No PAT, no secret.
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — Pipeline SLO
+
+on:
+  workflow_call:
+    inputs:
+      watched_workflow:
+        description: "Workflow filename (relative to .github/workflows/) whose runs are sampled."
+        type: string
+        default: "ci.yml"
+      sample_size:
+        description: "How many recent completed runs to sample."
+        type: number
+        default: 50
+      min_sample:
+        description: "Minimum sample size before SLOs are evaluated."
+        type: number
+        default: 5
+      p95_duration_max_minutes:
+        description: "Build duration p95 threshold, in minutes."
+        type: number
+        default: 10
+      min_success_rate_pct:
+        description: "Minimum success rate, as a percentage (0-100)."
+        type: number
+        default: 90
+      p95_queue_max_minutes:
+        description: "Queue-wait p95 threshold, in minutes."
+        type: number
+        default: 2
+
+jobs:
+  slo-check:
+    name: Evaluate pipeline SLOs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Evaluate pipeline SLOs and manage issue
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          WATCHED_WORKFLOW: ${{ inputs.watched_workflow }}
+          SAMPLE_SIZE: ${{ inputs.sample_size }}
+          MIN_SAMPLE: ${{ inputs.min_sample }}
+          P95_DURATION_MAX_MIN: ${{ inputs.p95_duration_max_minutes }}
+          MIN_SUCCESS_RATE_PCT: ${{ inputs.min_success_rate_pct }}
+          P95_QUEUE_MAX_MIN: ${{ inputs.p95_queue_max_minutes }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const WATCHED_WORKFLOW     = process.env.WATCHED_WORKFLOW || 'ci.yml';
+            const SAMPLE_SIZE          = Number(process.env.SAMPLE_SIZE || 50);
+            const MIN_SAMPLE           = Number(process.env.MIN_SAMPLE || 5);
+            const P95_DURATION_MAX_MS  = Number(process.env.P95_DURATION_MAX_MIN || 10) * 60 * 1000;
+            const MIN_SUCCESS_RATE     = Number(process.env.MIN_SUCCESS_RATE_PCT || 90) / 100;
+            const P95_QUEUE_MAX_MS     = Number(process.env.P95_QUEUE_MAX_MIN || 2) * 60 * 1000;
+            const LABEL_NAME           = 'pipeline-slo';
+            const LABEL_COLOR          = 'f97316';
+            const ISSUE_MARKER         = '<!-- pipeline-slo:breach -->';
+            const ISSUE_TITLE          = '[pipeline-slo] CI pipeline SLO breach';
+
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+
+            function p95(values) {
+              if (!values || values.length === 0) return 0;
+              const sorted = [...values].sort((a, b) => a - b);
+              const idx = Math.max(0, Math.ceil(0.95 * sorted.length) - 1);
+              return sorted[idx];
+            }
+
+            function utcNow() {
+              return new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+            }
+
+            function fmtMs(ms) {
+              const totalSec = Math.round(ms / 1000);
+              const m = Math.floor(totalSec / 60);
+              const s = totalSec % 60;
+              return m > 0 ? `${m}m ${s}s` : `${s}s`;
+            }
+
+            async function ensureLabel() {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: LABEL_NAME });
+                core.info(`Label "${LABEL_NAME}" already exists.`);
+              } catch (err) {
+                if (err.status === 404) {
+                  await github.rest.issues.createLabel({
+                    owner, repo, name: LABEL_NAME, color: LABEL_COLOR,
+                    description: 'Tracks pipeline SLO breaches (duration / success-rate / queue-wait)',
+                  });
+                  core.info(`Label "${LABEL_NAME}" created.`);
+                } else {
+                  throw err;
+                }
+              }
+            }
+
+            async function findOpenSloIssue() {
+              const resp = await github.rest.issues.listForRepo({
+                owner, repo, state: 'open', labels: LABEL_NAME, per_page: 50,
+              });
+              return resp.data.find(issue => issue.body && issue.body.includes(ISSUE_MARKER)) || null;
+            }
+
+            function buildBreachTable(breaches) {
+              const rows = breaches.map(b => `| ${b.metric} | ${b.observed} | ${b.threshold} | ${b.sampleSize} |`);
+              return [`| Metric | Observed | Threshold | Sample size |`, `|--------|----------|-----------|-------------|`, ...rows].join('\n');
+            }
+
+            const runsResp = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id: WATCHED_WORKFLOW, status: 'completed', per_page: SAMPLE_SIZE,
+            });
+            const runs = runsResp.data.workflow_runs;
+
+            core.info(`Fetched ${runs.length} completed run(s) for ${WATCHED_WORKFLOW}.`);
+
+            if (runs.length < MIN_SAMPLE) {
+              core.info(`Insufficient sample (n=${runs.length} < ${MIN_SAMPLE}) — skipping SLO eval.`);
+              return;
+            }
+
+            const durations   = [];
+            const queueWaits  = [];
+            let successCount  = 0;
+            let judgedCount   = 0;
+
+            for (const run of runs) {
+              if (run.run_started_at && run.updated_at) {
+                const dur = Date.parse(run.updated_at) - Date.parse(run.run_started_at);
+                if (dur >= 0) durations.push(dur);
+              }
+              if (run.created_at && run.run_started_at) {
+                const qw = Date.parse(run.run_started_at) - Date.parse(run.created_at);
+                if (qw >= 0) queueWaits.push(qw);
+              }
+              if (run.conclusion === 'success') {
+                successCount++; judgedCount++;
+              } else if (run.conclusion === 'failure') {
+                judgedCount++;
+              }
+            }
+
+            const p95Duration  = p95(durations);
+            const p95Queue     = p95(queueWaits);
+            const successRate  = judgedCount > 0 ? successCount / judgedCount : 1.0;
+
+            const breaches = [];
+
+            if (p95Duration > P95_DURATION_MAX_MS) {
+              breaches.push({ metric: 'Build duration p95', observed: fmtMs(p95Duration), threshold: `< ${fmtMs(P95_DURATION_MAX_MS)}`, sampleSize: durations.length });
+            }
+            if (successRate < MIN_SUCCESS_RATE) {
+              const pct = (successRate * 100).toFixed(1);
+              breaches.push({ metric: 'Success rate', observed: `${pct}%`, threshold: `>= ${(MIN_SUCCESS_RATE * 100).toFixed(0)}%`, sampleSize: judgedCount });
+            }
+            if (p95Queue > P95_QUEUE_MAX_MS) {
+              breaches.push({ metric: 'Queue-wait p95', observed: fmtMs(p95Queue), threshold: `< ${fmtMs(P95_QUEUE_MAX_MS)}`, sampleSize: queueWaits.length });
+            }
+
+            core.info(`SLO summary | duration p95=${fmtMs(p95Duration)} (${p95Duration > P95_DURATION_MAX_MS ? 'BREACH' : 'ok'}) | successRate=${(successRate * 100).toFixed(1)}% (${successRate < MIN_SUCCESS_RATE ? 'BREACH' : 'ok'}) | queue p95=${fmtMs(p95Queue)} (${p95Queue > P95_QUEUE_MAX_MS ? 'BREACH' : 'ok'})`);
+
+            await ensureLabel();
+
+            const openIssue = await findOpenSloIssue();
+
+            if (breaches.length > 0) {
+              const breachTable = buildBreachTable(breaches);
+              const detectedAt  = utcNow();
+
+              if (!openIssue) {
+                const issueBody = [
+                  ISSUE_MARKER,
+                  `## CI Pipeline SLO Breach Detected`,
+                  ``,
+                  `The following SLOs are currently breached over the last **${runs.length}** completed \`${WATCHED_WORKFLOW}\` runs:`,
+                  ``,
+                  breachTable,
+                  ``,
+                  `### Remediation hints`,
+                  ``,
+                  `- **Build duration p95 breach** — investigate slow jobs; check for dependency install regressions, test-suite bloat, or Docker layer cache misses.`,
+                  `- **Success rate breach** — look for flaky tests, environment instability, or recent commits that introduced consistent failures.`,
+                  `- **Queue-wait p95 breach** — runner pool may be undersized or saturated; consider increasing concurrent runners or reviewing job concurrency limits.`,
+                  ``,
+                  `| Field | Value |`,
+                  `|-------|-------|`,
+                  `| **Watched workflow** | \`${WATCHED_WORKFLOW}\` |`,
+                  `| **Sample size** | ${runs.length} completed runs |`,
+                  `| **Detected at** | ${detectedAt} |`,
+                  ``,
+                  `> This issue will be **auto-closed** when all 3 SLOs return within target.`,
+                  ``,
+                  `> Auto-filed by Orbit Pipeline SLO Watchdog (ynetplus/orbit)`,
+                ].join('\n');
+
+                const newIssue = await github.rest.issues.create({ owner, repo, title: ISSUE_TITLE, body: issueBody, labels: [LABEL_NAME] });
+                core.info(`Created SLO breach issue #${newIssue.data.number}: ${newIssue.data.html_url}`);
+              } else {
+                const commentBody = [
+                  `🔴 **SLO breach persists** as of ${detectedAt}`,
+                  ``,
+                  breachTable,
+                  ``,
+                  `| **Sample size** | ${runs.length} completed runs |`,
+                  `|---|---|`,
+                ].join('\n');
+                await github.rest.issues.createComment({ owner, repo, issue_number: openIssue.number, body: commentBody });
+                core.info(`SLO breach issue #${openIssue.number} already open — added status comment.`);
+              }
+            } else {
+              if (openIssue) {
+                const recoveryComment = [
+                  `✅ **All 3 SLOs within target** as of ${utcNow()}`,
+                  ``,
+                  `| Metric | Observed | Threshold | Sample size |`,
+                  `|--------|----------|-----------|-------------|`,
+                  `| Build duration p95 | ${fmtMs(p95Duration)} | < ${fmtMs(P95_DURATION_MAX_MS)} | ${durations.length} |`,
+                  `| Success rate | ${(successRate * 100).toFixed(1)}% | >= ${(MIN_SUCCESS_RATE * 100).toFixed(0)}% | ${judgedCount} |`,
+                  `| Queue-wait p95 | ${fmtMs(p95Queue)} | < ${fmtMs(P95_QUEUE_MAX_MS)} | ${queueWaits.length} |`,
+                  ``,
+                  `Closing this issue automatically. Re-opens automatically if a breach recurs.`,
+                ].join('\n');
+                await github.rest.issues.createComment({ owner, repo, issue_number: openIssue.number, body: recoveryComment });
+                await github.rest.issues.update({ owner, repo, issue_number: openIssue.number, state: 'closed' });
+                core.info(`Closed SLO breach issue #${openIssue.number} — all SLOs recovered.`);
+              } else {
+                core.info('All SLOs within target — no open issue to close.');
+              }
+            }
+
+            core.info('Pipeline SLO check complete.');

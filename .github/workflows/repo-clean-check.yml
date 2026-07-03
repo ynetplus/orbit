@@ -1,0 +1,73 @@
+# Orbit — Repo Clean Post-Build (HARD BLOCK)
+#
+# Extracted from ynetplus .github/workflows/ci.yml `repo-clean-post-build`
+# job, behaviorally identical: ensures no generated/modified files exist
+# after the caller's build/test steps ran, preventing accidental commits of
+# build artifacts or generated files. Call this AFTER your build/test jobs
+# (in the same `needs:` chain) — this workflow only checks out and diffs; it
+# does not itself run your build.
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — Repo Clean Post-Build
+
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: >
+          Optional space-separated list of paths to restrict `git status`
+          to (e.g. "backend/ apps/"). Empty = whole repo.
+        type: string
+        default: ""
+
+jobs:
+  clean-check:
+    name: Repo Clean Post-Build (HARD BLOCK)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: HARD BLOCK - Verify repo is clean after build/tests
+        env:
+          PATHS: ${{ inputs.paths }}
+        run: |
+          echo "=============================================================="
+          echo "🔒 REPO CLEAN POST-BUILD CHECK (HARD BLOCK — Orbit)"
+          echo "=============================================================="
+          echo ""
+          echo "Verifying no files were modified or generated during CI..."
+          echo ""
+
+          if [ -n "$PATHS" ]; then
+            DIRTY=$(git status --porcelain -- $PATHS)
+          else
+            DIRTY=$(git status --porcelain)
+          fi
+
+          if [ -n "$DIRTY" ]; then
+            echo "❌ BLOCKED: Workspace has modified or untracked files!"
+            echo ""
+            echo "=============================================================="
+            echo "📋 git status --porcelain"
+            echo "=============================================================="
+            echo "$DIRTY"
+            echo ""
+            echo "=============================================================="
+            echo "📋 git diff (modified files)"
+            echo "=============================================================="
+            git diff || true
+            echo ""
+            echo "=============================================================="
+            echo "🛠️ FIX: Either:"
+            echo "   1. Add generated files to .gitignore"
+            echo "   2. Ensure build process doesn't modify tracked files"
+            echo "   3. Clean up generated files before commit"
+            echo "=============================================================="
+            exit 1
+          fi
+
+          echo "✅ REPO CLEAN POST-BUILD PASSED"
+          echo ""
+          echo "No modified or untracked files after build/tests."

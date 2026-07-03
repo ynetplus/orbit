@@ -1,0 +1,344 @@
+# Orbit — CI-Health Watchdog (Dead-Man's-Switch)
+#
+# Extracted from ynetplus .github/workflows/ci-health-watchdog.yml
+# (CR-A078-6/CR-A078-16), behaviorally identical. For each watched scheduled
+# workflow:
+#   1. Fetches the 10 most-recent completed runs on the given branch.
+#   2. Walks the consecutive-failure streak from the most-recent run; flags
+#      ONLY when the streak's OLDEST failure started > threshold_hours ago.
+#   3. Dead-Man's-Switch: also flags a workflow that has STOPPED firing
+#      entirely (no run of any conclusion within its expected_max_gap_ms).
+#   4. Manages a single [ci-health] issue per watched workflow (create /
+#      comment / auto-close on recovery).
+#
+# Permissions: least-privilege — read repo/actions, write issues only.
+# Token: built-in GITHUB_TOKEN only. No PAT, no new secrets.
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — CI-Health Watchdog
+
+on:
+  workflow_call:
+    inputs:
+      watched:
+        description: >
+          JSON array of watched scheduled workflows, e.g.
+          '[{"file":"nightly-secrets-full-scan.yml","title":"Nightly Full Secret Scan","expected_max_gap_hours":48}]'.
+          `file` must match the workflow's filename under .github/workflows/ in the CONSUMER repo.
+        type: string
+      branch:
+        description: "Branch whose runs are inspected."
+        type: string
+        default: "main"
+      threshold_hours:
+        description: "How many hours a failure streak must persist before an issue is filed."
+        type: number
+        default: 48
+
+jobs:
+  watchdog:
+    name: Watch scheduled gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Inspect scheduled gates and manage ci-health issues
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          WATCHED_JSON: ${{ inputs.watched }}
+          BRANCH: ${{ inputs.branch }}
+          THRESHOLD_HOURS: ${{ inputs.threshold_hours }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const HOUR_MS = 60 * 60 * 1000;
+
+            const WATCHED = JSON.parse(process.env.WATCHED_JSON || '[]').map(w => ({
+              file: w.file,
+              title: w.title || w.file,
+              expected_max_gap_ms: (w.expected_max_gap_hours || 48) * HOUR_MS,
+            }));
+
+            if (WATCHED.length === 0) {
+              core.warning('No `watched` entries provided — nothing to check. Pass the `watched` input as a JSON array.');
+            }
+
+            const BRANCH = process.env.BRANCH || 'main';
+            const LABEL_NAME  = 'ci-health';
+            const LABEL_COLOR = 'e11d48';
+            const THRESHOLD_MS = Number(process.env.THRESHOLD_HOURS || 48) * HOUR_MS;
+            const BAD_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out']);
+
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+
+            async function ensureLabel() {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: LABEL_NAME });
+                core.info(`Label "${LABEL_NAME}" already exists.`);
+              } catch (err) {
+                if (err.status === 404) {
+                  await github.rest.issues.createLabel({
+                    owner, repo, name: LABEL_NAME, color: LABEL_COLOR,
+                    description: 'Tracks persistently-failing scheduled CI gates',
+                  });
+                  core.info(`Label "${LABEL_NAME}" created.`);
+                } else {
+                  throw err;
+                }
+              }
+            }
+
+            async function getRecentRuns(workflowFile, perPage = 10) {
+              const resp = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id: workflowFile, branch: BRANCH,
+                status: 'completed', per_page: perPage,
+              });
+              return resp.data.workflow_runs;
+            }
+
+            async function getLatestRunAnyConclusion(workflowFile) {
+              const resp = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id: workflowFile, per_page: 1,
+              });
+              const runs = resp.data.workflow_runs;
+              return (runs && runs.length > 0) ? runs[0] : null;
+            }
+
+            function staleMarker(workflowFile) {
+              return `<!-- ci-health:stale:${workflowFile} -->`;
+            }
+
+            async function findOpenStaleIssue(workflowFile) {
+              const resp = await github.rest.issues.listForRepo({
+                owner, repo, state: 'open', labels: LABEL_NAME, per_page: 50,
+              });
+              const marker = staleMarker(workflowFile);
+              return resp.data.find(issue => issue.body && issue.body.includes(marker)) || null;
+            }
+
+            async function checkStaleness(watched) {
+              let latestRun;
+              try {
+                latestRun = await getLatestRunAnyConclusion(watched.file);
+              } catch (err) {
+                core.warning(`  [staleness] Could not fetch latest run for ${watched.file}: ${err.message}`);
+                return;
+              }
+
+              if (!latestRun) {
+                core.info('  [staleness] No runs ever for this workflow — skipping (cannot compute gap).');
+                return;
+              }
+
+              const lastRunIso = latestRun.created_at;
+              const gapMs = Date.now() - Date.parse(lastRunIso);
+              const gapHours = Math.round(gapMs / HOUR_MS);
+              const maxHours = Math.round(watched.expected_max_gap_ms / HOUR_MS);
+              const openStale = await findOpenStaleIssue(watched.file);
+
+              if (gapMs > watched.expected_max_gap_ms) {
+                core.info(`  [staleness] STALE — last run ${gapHours}h ago (> expected max ${maxHours}h).`);
+                if (!openStale) {
+                  const issueTitle = `🕒 [ci-health] Schedule stopped firing: ${watched.title} (${watched.file})`;
+                  const issueBody = [
+                    staleMarker(watched.file),
+                    `## Scheduled gate appears to have STOPPED firing`,
+                    ``,
+                    `| Field | Value |`,
+                    `|-------|-------|`,
+                    `| **Workflow** | \`${watched.file}\` (${watched.title}) |`,
+                    `| **Last run (any conclusion)** | ${lastRunIso} |`,
+                    `| **Last run link** | ${latestRun.html_url} |`,
+                    `| **Gap since last run** | ~${gapHours} h |`,
+                    `| **Expected max gap** | ${maxHours} h |`,
+                    `| **Detected at** | ${utcNow()} |`,
+                    ``,
+                    `### Remediation`,
+                    ``,
+                    `No run of any conclusion has appeared within the expected cadence — the cron `,
+                    `may have silently stopped. Verify the \`schedule:\` trigger still exists and that `,
+                    `**Actions → this workflow** is not disabled (GitHub auto-disables scheduled `,
+                    `workflows after ~60 days of repository inactivity).`,
+                    ``,
+                    `> This issue will be **auto-closed** by the watchdog once a fresh run appears.`,
+                    ``,
+                    `> Auto-filed by Orbit CI-Health Watchdog (ynetplus/orbit)`,
+                  ].join('\n');
+
+                  const newIssue = await github.rest.issues.create({
+                    owner, repo, title: issueTitle, body: issueBody, labels: [LABEL_NAME],
+                  });
+                  core.info(`  [staleness] Created staleness issue #${newIssue.data.number}: ${newIssue.data.html_url}`);
+                } else {
+                  const updateComment = [
+                    `🕒 **Still not firing** as of ${utcNow()}`,
+                    ``,
+                    `| Field | Value |`,
+                    `|-------|-------|`,
+                    `| **Last run (any conclusion)** | ${lastRunIso} |`,
+                    `| **Gap since last run** | ~${gapHours} h |`,
+                    `| **Expected max gap** | ${maxHours} h |`,
+                  ].join('\n');
+                  await github.rest.issues.createComment({ owner, repo, issue_number: openStale.number, body: updateComment });
+                  core.info(`  [staleness] Staleness issue #${openStale.number} already open — added status comment.`);
+                }
+              } else {
+                core.info(`  [staleness] FRESH — last run ${gapHours}h ago (<= expected max ${maxHours}h).`);
+                if (openStale) {
+                  const recoveryComment = [
+                    `✅ **Schedule recovered** at ${utcNow()}`,
+                    ``,
+                    `A fresh run appeared within the expected gap:`,
+                    ``,
+                    `- Last run: ${lastRunIso} (${latestRun.html_url})`,
+                    `- Gap: ~${gapHours} h (expected max ${maxHours} h)`,
+                    ``,
+                    `Closing this staleness issue automatically.`,
+                  ].join('\n');
+                  await github.rest.issues.createComment({ owner, repo, issue_number: openStale.number, body: recoveryComment });
+                  await github.rest.issues.update({ owner, repo, issue_number: openStale.number, state: 'closed' });
+                  core.info(`  [staleness] Closed staleness issue #${openStale.number} — schedule recovered.`);
+                } else {
+                  core.info('  [staleness] No open staleness issue — nothing to close.');
+                }
+              }
+            }
+
+            function analyseRuns(runs) {
+              if (!runs || runs.length === 0) {
+                return { isPersistentFailure: false, isGreen: false, noRuns: true };
+              }
+              const latestRun = runs[0];
+              const latestConclusion = latestRun.conclusion;
+              if (!BAD_CONCLUSIONS.has(latestConclusion)) {
+                return { isPersistentFailure: false, isGreen: true, latestRun };
+              }
+              let streak = 0;
+              let oldestFailureRun = null;
+              for (const run of runs) {
+                if (BAD_CONCLUSIONS.has(run.conclusion)) {
+                  streak++;
+                  oldestFailureRun = run;
+                } else {
+                  break;
+                }
+              }
+              const oldestFailureAt = new Date(oldestFailureRun.created_at);
+              const ageMs = Date.now() - oldestFailureAt.getTime();
+              const isPersistentFailure = ageMs > THRESHOLD_MS;
+              return { isPersistentFailure, isGreen: false, streakLength: streak, oldestFailureAt, latestRun, oldestFailureRun };
+            }
+
+            async function findOpenIssue(workflowFile) {
+              const resp = await github.rest.issues.listForRepo({
+                owner, repo, state: 'open', labels: LABEL_NAME, per_page: 50,
+              });
+              const marker = `[ci-health] ${workflowFile}`;
+              return resp.data.find(issue => issue.title.includes(marker)) || null;
+            }
+
+            function utcNow() {
+              return new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+            }
+
+            await ensureLabel();
+
+            for (const watched of WATCHED) {
+              core.info(`\n=== Checking: ${watched.file} ===`);
+
+              await checkStaleness(watched);
+
+              let runs;
+              try {
+                runs = await getRecentRuns(watched.file);
+              } catch (err) {
+                core.warning(`Could not fetch runs for ${watched.file}: ${err.message}`);
+                continue;
+              }
+
+              core.info(`  Fetched ${runs.length} completed run(s) on ${BRANCH}.`);
+
+              const result = analyseRuns(runs);
+
+              if (result.noRuns) {
+                core.info('  No completed runs found — skipping (cadence gap, not a failure).');
+                continue;
+              }
+
+              if (result.isGreen) {
+                core.info(`  Latest run is GREEN (conclusion: ${result.latestRun.conclusion}).`);
+                const openIssue = await findOpenIssue(watched.file);
+                if (openIssue) {
+                  const recoveryComment = [
+                    `✅ **Gate recovered** at ${utcNow()}`,
+                    ``,
+                    `Latest successful run: ${result.latestRun.html_url}`,
+                    ``,
+                    `Closing this issue automatically. Re-open if the gate fails again.`,
+                  ].join('\n');
+                  await github.rest.issues.createComment({ owner, repo, issue_number: openIssue.number, body: recoveryComment });
+                  await github.rest.issues.update({ owner, repo, issue_number: openIssue.number, state: 'closed' });
+                  core.info(`  Closed issue #${openIssue.number} — gate recovered.`);
+                } else {
+                  core.info('  No open ci-health issue for this gate — nothing to close.');
+                }
+                continue;
+              }
+
+              core.info(`  Latest run FAILED (conclusion: ${result.latestRun.conclusion}). Consecutive streak: ${result.streakLength}. Oldest failure at: ${result.oldestFailureAt.toISOString()}.`);
+
+              if (!result.isPersistentFailure) {
+                core.info(`  Failure streak started < threshold ago — within grace window. No issue action.`);
+                continue;
+              }
+
+              const openIssue = await findOpenIssue(watched.file);
+              const ageHours = Math.round((Date.now() - result.oldestFailureAt.getTime()) / (1000 * 60 * 60));
+
+              if (!openIssue) {
+                const issueTitle = `[ci-health] ${watched.file} red >${ageHours}h`;
+                const issueBody = [
+                  `## Scheduled gate has been failing for >${ageHours} hours`,
+                  ``,
+                  `| Field | Value |`,
+                  `|-------|-------|`,
+                  `| **Workflow** | \`${watched.file}\` (${watched.title}) |`,
+                  `| **Latest failed run** | ${result.latestRun.html_url} |`,
+                  `| **Oldest consecutive failure** | ${result.oldestFailureRun.html_url} |`,
+                  `| **Streak length** | ${result.streakLength} run(s) |`,
+                  `| **Failing since** | ${result.oldestFailureAt.toISOString()} |`,
+                  `| **Age** | ~${ageHours} h |`,
+                  `| **Detected at** | ${utcNow()} |`,
+                  ``,
+                  `### Action required`,
+                  ``,
+                  `1. Check the workflow run logs linked above.`,
+                  `2. Fix the root cause and push a fix branch.`,
+                  `3. This issue will be **auto-closed** on the next run once the gate is \`success\`.`,
+                  ``,
+                  `> Auto-filed by Orbit CI-Health Watchdog (ynetplus/orbit)`,
+                ].join('\n');
+
+                const newIssue = await github.rest.issues.create({ owner, repo, title: issueTitle, body: issueBody, labels: [LABEL_NAME] });
+                core.info(`  Created issue #${newIssue.data.number}: ${newIssue.data.html_url}`);
+              } else {
+                const updateComment = [
+                  `🔴 **Still failing** as of ${utcNow()}`,
+                  ``,
+                  `| Field | Value |`,
+                  `|-------|-------|`,
+                  `| **Latest failed run** | ${result.latestRun.html_url} |`,
+                  `| **Streak length** | ${result.streakLength} run(s) |`,
+                  `| **Failing since** | ${result.oldestFailureAt.toISOString()} |`,
+                  `| **Age** | ~${ageHours} h |`,
+                ].join('\n');
+                await github.rest.issues.createComment({ owner, repo, issue_number: openIssue.number, body: updateComment });
+                core.info(`  Issue #${openIssue.number} already open — added status comment.`);
+              }
+            }
+
+            core.info('\nWatchdog run complete.');

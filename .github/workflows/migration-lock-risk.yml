@@ -1,0 +1,110 @@
+# Orbit — Migration Lock-Risk Analysis (WARN)
+#
+# Extracted from ynetplus .github/workflows/ci.yml `migration-standard` job's
+# "WARN - Migration Lock-Risk Analysis" step (CR-A078-14), behaviorally
+# identical: finds newly-added Alembic migration files vs base_ref, then
+# runs the engine script (scripts/check_migration_lock_risk.py, moved into
+# this repo unchanged) against them. WARN-only gate — always exits 0.
+#
+# Engine script provenance: this workflow checks out ITS OWN repo (Orbit) at
+# the exact SHA the consumer pinned when it wrote
+# `uses: ynetplus/orbit/.github/workflows/migration-lock-risk.yml@<sha>`.
+# `github.workflow_ref` inside a called reusable workflow identifies the
+# reusable workflow's own coordinates (owner/repo/.github/workflows/file.yml@ref)
+# — the same mechanism that backs OIDC `job_workflow_ref` trust scoping
+# (RN-019 §3) — so the script version always matches the pinned workflow SHA,
+# with no separate ref to keep in sync.
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — Migration Lock-Risk Analysis
+
+on:
+  workflow_call:
+    inputs:
+      migrations_glob:
+        description: "Glob (relative to repo root) matching Alembic migration files."
+        type: string
+        default: "backend/alembic/versions/*.py"
+      base_ref:
+        description: "Branch to diff against to find newly-added migration files."
+        type: string
+        default: "stage"
+
+jobs:
+  lock-risk:
+    name: Migration Lock-Risk Analysis (WARN)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout consumer repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Resolve orbit coordinates (self, pinned SHA)
+        id: orbit_ref
+        run: |
+          WF_REF="${{ github.workflow_ref }}"
+          # format: owner/repo/.github/workflows/file.yml@ref
+          REPO="${WF_REF%%/.github/*}"
+          REF="${WF_REF##*@}"
+          echo "Resolved orbit repo=$REPO ref=$REF (from github.workflow_ref=$WF_REF)"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout orbit engine scripts (self, pinned)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ${{ steps.orbit_ref.outputs.repo }}
+          ref: ${{ steps.orbit_ref.outputs.ref }}
+          path: _orbit-engine
+
+      - name: Find newly-added migration files
+        id: new_migrations
+        env:
+          MIGRATIONS_GLOB: ${{ inputs.migrations_glob }}
+          BASE_REF_INPUT: ${{ inputs.base_ref }}
+        run: |
+          echo "=============================================================="
+          echo "⚠️  MIGRATION LOCK-RISK ANALYSIS (WARN — Orbit)"
+          echo "=============================================================="
+          echo "Checking new migrations for DDL patterns that acquire long-held locks."
+          echo "Reference: RN-019 §3 / GoCardless 15s outage post-mortem"
+          echo ""
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="${{ github.event.before }}"
+          fi
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="origin/${BASE_REF_INPUT}"
+          fi
+
+          # Convert the glob into a grep-friendly regex for the diff filter.
+          REGEX=$(echo "$MIGRATIONS_GLOB" | sed 's/\*/[^\/]*/g' | sed 's/\//\\\//g')
+
+          NEW_MIGRATIONS=$(git diff --name-only --diff-filter=A "$BASE_SHA" HEAD 2>/dev/null \
+            | grep -E "^${REGEX}$" || true)
+
+          if [ -z "$NEW_MIGRATIONS" ]; then
+            echo "No new migration files in this PR -- lock-risk check skipped."
+            echo "has_new=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "New migration files:"
+          echo "$NEW_MIGRATIONS" | sed 's/^/   /'
+          echo "has_new=true" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$NEW_MIGRATIONS" > .new-migrations.txt
+
+      - name: Run lock-risk analyzer
+        if: steps.new_migrations.outputs.has_new == 'true'
+        run: |
+          python3 _orbit-engine/scripts/check_migration_lock_risk.py $(cat .new-migrations.txt)
+          echo ""
+          echo "=============================================================="
+          echo "⚠️  LOCK-RISK ANALYSIS COMPLETE (exit 0 — WARN gate only)"
+          echo "Safe to ignore: new tables, tiny tables, off-hours deploys."
+          echo "Suppress: add '# LOCK-RISK: ACCEPTED — <reason>' before op call."
+          echo "=============================================================="

@@ -1,0 +1,61 @@
+# Orbit — SAST Bandit (HARD BLOCK)
+#
+# Extracted from ynetplus .github/workflows/security.yml `sast-bandit` job
+# (CR-A079-3; originally CR-458), behaviorally identical. Scans Python code
+# for security vulnerabilities (SQL injection, shell injection, hardcoded
+# passwords, insecure crypto, etc). Only HIGH severity + HIGH confidence
+# findings block CI; medium+ findings are reported informationally.
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — SAST Bandit
+
+on:
+  workflow_call:
+    inputs:
+      scan_path:
+        description: "Directory tree to scan with Bandit."
+        type: string
+        default: "backend/"
+      bandit_config:
+        description: "Path to a .bandit config file (optional; omit to run with Bandit defaults)."
+        type: string
+        default: ""
+
+jobs:
+  bandit:
+    name: SAST Bandit (HARD BLOCK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.11'
+
+      - name: Install Bandit
+        run: pip install bandit
+
+      - name: Run Bandit (HARD BLOCK on HIGH/HIGH)
+        env:
+          SCAN_PATH: ${{ inputs.scan_path }}
+          BANDIT_CONFIG: ${{ inputs.bandit_config }}
+        run: |
+          echo "=============================================================="
+          echo "🔒 SAST SCAN — BANDIT (HARD BLOCK — Orbit)"
+          echo "=============================================================="
+          echo ""
+
+          CONFIG_ARGS=()
+          if [ -n "$BANDIT_CONFIG" ] && [ -f "$BANDIT_CONFIG" ]; then
+            CONFIG_ARGS=("-c" "$BANDIT_CONFIG")
+          fi
+
+          echo "--- Medium+ findings (informational) ---"
+          bandit -r "$SCAN_PATH" "${CONFIG_ARGS[@]}" --severity-level medium --confidence-level medium -f screen || true
+          echo ""
+
+          echo "--- HIGH severity + HIGH confidence (BLOCKING) ---"
+          bandit -r "$SCAN_PATH" "${CONFIG_ARGS[@]}" --severity-level high --confidence-level high
+          echo ""
+          echo "✅ SAST SCAN PASSED — No HIGH/HIGH findings"
