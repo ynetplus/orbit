@@ -59,7 +59,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install yamllint
-        run: pip install yamllint
+        run: pip install yamllint==1.38.0
 
       - name: Run yamllint
         run: |

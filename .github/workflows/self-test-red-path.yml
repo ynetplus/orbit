@@ -29,6 +29,8 @@ jobs:
   # ---- secret-detection: RED (fixture finding NOT in baseline) ----
   secret-detection-fail:
     uses: ./.github/workflows/secret-detection.yml
+    permissions:
+      contents: read
     with:
       baseline_path: self-test/fixtures/secrets/empty.secrets.baseline
       base_ref: self-test/base
@@ -36,5 +38,7 @@ jobs:
   # ---- alembic-single-head: RED (2 heads) ----
   alembic-single-head-fail:
     uses: ./.github/workflows/alembic-single-head.yml
+    permissions:
+      contents: read
     with:
       alembic_dir: self-test/fixtures/alembic-conflict
