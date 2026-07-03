@@ -9,11 +9,34 @@
 # Engine script provenance: this workflow checks out ITS OWN repo (Orbit) at
 # the exact SHA the consumer pinned when it wrote
 # `uses: ynetplus/orbit/.github/workflows/migration-lock-risk.yml@<sha>`.
-# `github.workflow_ref` inside a called reusable workflow identifies the
-# reusable workflow's own coordinates (owner/repo/.github/workflows/file.yml@ref)
-# — the same mechanism that backs OIDC `job_workflow_ref` trust scoping
-# (RN-019 §3) — so the script version always matches the pinned workflow SHA,
-# with no separate ref to keep in sync.
+#
+# BF FIX (2026-07-03, live-proven via ynetplus CR-A079-13's first real
+# consumer PR — run 28686624241/job 85080422658): the original CR-A078-8
+# implementation tried to self-detect Orbit's own coordinates via
+# `github.workflow_ref`. That context is a RUN-level attribute — it always
+# resolves to the TOP-LEVEL/triggering workflow file for the whole run
+# (e.g. the consumer's `security.yml`), never to "the reusable workflow
+# file that defines the current job". There is NO `github.*` context
+# expression that exposes that (confirmed against actionlint's context
+# schema — `job_workflow_ref` is an OIDC ID-TOKEN CLAIM, not a `github.*`
+# expression available in `${{ }}`; a first attempted fix that swapped in
+# `github.job_workflow_ref` does not exist as a context field and would
+# have failed actionlint, let alone runtime). The original design silently
+# checked out the CONSUMER repo into `_orbit-engine/` instead of Orbit, so
+# `_orbit-engine/scripts/*.py` never existed and every call failed with
+# "No such file or directory". Never caught by CR-A079-8's self-test
+# (migration-lock-risk/sast-semgrep/supply-audit were explicitly NOT in the
+# self-test matrix — see that CR's forge report "Deviations" section, which
+# assumed lint/structural checks were sufficient proof; they were not).
+#
+# THE FIX: self-detection is abandoned. The repo name is a static literal
+# ("ynetplus/orbit" — this workflow IS Orbit, checking out itself, so the
+# repo never varies). The ref genuinely cannot be self-discovered, so the
+# caller passes it explicitly via the `orbit_ref` input — the exact same
+# SHA already in the caller's own `uses: .../migration-lock-risk.yml@<sha>`
+# line, just also written into `with: orbit_ref: <sha>`. Yes, this
+# duplicates the SHA in two places in the caller's YAML; that's the
+# unavoidable cost of there being no framework-level way to avoid it.
 #
 # GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
 
@@ -30,6 +53,14 @@ on:
         description: "Branch to diff against to find newly-added migration files."
         type: string
         default: "stage"
+      orbit_ref:
+        description: >-
+          REQUIRED. The exact Orbit commit SHA this workflow is pinned at in
+          your `uses: ynetplus/orbit/.github/workflows/migration-lock-risk.yml@<sha>`
+          line — paste the same SHA here. GitHub Actions has no context
+          expression that lets a reusable workflow discover its own pinned
+          ref (see header comment), so the caller must state it explicitly.
+        type: string
 
 jobs:
   lock-risk:
@@ -43,22 +74,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve orbit coordinates (self, pinned SHA)
-        id: orbit_ref
+      - name: Guard - orbit_ref input provided
         run: |
-          WF_REF="${{ github.workflow_ref }}"
-          # format: owner/repo/.github/workflows/file.yml@ref
-          REPO="${WF_REF%%/.github/*}"
-          REF="${WF_REF##*@}"
-          echo "Resolved orbit repo=$REPO ref=$REF (from github.workflow_ref=$WF_REF)"
-          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          if [ -z "${{ inputs.orbit_ref }}" ]; then
+            echo "❌ 'orbit_ref' input is required — pass the same SHA used in your 'uses:' line for this workflow. See this workflow file's header comment for why."
+            exit 1
+          fi
 
-      - name: Checkout orbit engine scripts (self, pinned)
+      - name: Checkout orbit engine scripts (self, pinned via caller-supplied orbit_ref)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
-          repository: ${{ steps.orbit_ref.outputs.repo }}
-          ref: ${{ steps.orbit_ref.outputs.ref }}
+          repository: ynetplus/orbit
+          ref: ${{ inputs.orbit_ref }}
           path: _orbit-engine
 
       - name: Find newly-added migration files

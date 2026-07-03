@@ -14,7 +14,10 @@
 # `baseline_file` / path inputs.
 #
 # Engine script provenance: see migration-lock-risk.yml's header comment for
-# the `github.workflow_ref` self-checkout mechanism — identical pattern here.
+# the full BF writeup (2026-07-03). Short version: there is no `github.*`
+# context expression that lets a reusable workflow discover its own pinned
+# ref, so self-detection is abandoned — the caller passes the SHA
+# explicitly via the `orbit_ref` input (same value as in its `uses:` line).
 #
 # GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
 
@@ -55,6 +58,13 @@ on:
         description: "If true, non-zero new findings fail the job (HARD BLOCK). If false, findings are reported only (WARN)."
         type: boolean
         default: true
+      orbit_ref:
+        description: >-
+          REQUIRED. The exact Orbit commit SHA this workflow is pinned at in
+          your `uses: ynetplus/orbit/.github/workflows/supply-audit.yml@<sha>`
+          line — paste the same SHA here. See migration-lock-risk.yml's
+          header comment for why this can't be self-detected.
+        type: string
     secrets:
       snyk_token:
         description: "Optional Snyk token — activates premium Snyk scanning when lane=all."
@@ -70,20 +80,18 @@ jobs:
       - name: Checkout consumer repo
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
-      - name: Resolve orbit coordinates (self, pinned SHA)
-        id: orbit_ref
+      - name: Guard - orbit_ref input provided
         run: |
-          WF_REF="${{ github.workflow_ref }}"
-          REPO="${WF_REF%%/.github/*}"
-          REF="${WF_REF##*@}"
-          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          if [ -z "${{ inputs.orbit_ref }}" ]; then
+            echo "❌ 'orbit_ref' input is required — pass the same SHA used in your 'uses:' line for this workflow."
+            exit 1
+          fi
 
-      - name: Checkout orbit engine scripts (self, pinned)
+      - name: Checkout orbit engine scripts (self, pinned via caller-supplied orbit_ref)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
-          repository: ${{ steps.orbit_ref.outputs.repo }}
-          ref: ${{ steps.orbit_ref.outputs.ref }}
+          repository: ynetplus/orbit
+          ref: ${{ inputs.orbit_ref }}
           path: _orbit-engine
 
       - name: Set up Python

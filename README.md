@@ -150,10 +150,27 @@ here" below).
 
 Tier 2's *engine* (this repo's `scripts/supply-run.sh` / `scripts/semgrep-run.sh`)
 is product-agnostic; your ruleset files and baseline counts are product data
-and stay in YOUR repo, passed in as paths. The reusable workflow self-checks-out
-this repo at the exact SHA it was invoked at (via `github.workflow_ref` — the
-same mechanism GitHub uses for OIDC `job_workflow_ref` trust scoping) to fetch
-the matching engine script version — no separate ref to keep in sync.
+and stay in YOUR repo, passed in as paths. The reusable workflow checks out
+this repo (`ynetplus/orbit`, a static literal — the workflow IS Orbit) at the
+exact SHA you pass via the **required** `orbit_ref` input — the same SHA
+already in your `uses: .../sast-semgrep.yml@<sha>` (or `supply-audit.yml`,
+`migration-lock-risk.yml`) line, just also written into `with: orbit_ref: <sha>`.
+
+**BF fix (2026-07-03):** the original CR-A079-8 implementation tried to
+self-detect Orbit's own coordinates via `github.workflow_ref`, which is a
+RUN-level attribute that always resolves to the TOP-LEVEL/triggering
+workflow (e.g. the consumer's `security.yml`), never to "the reusable
+workflow file that defines the current job" — GitHub Actions has no
+`github.*` context expression that exposes that (`job_workflow_ref` is an
+OIDC ID-token claim, not a `github.*` expression). That silently checked
+out the CONSUMER's repo instead of Orbit, so `_orbit-engine/scripts/*.py`
+never existed and every call failed. First caught live by ynetplus's
+CR-A079-13 (the first real consumer to exercise this path end-to-end;
+CR-A079-8's self-test didn't cover sast-semgrep/supply-audit/
+migration-lock-risk). Fixed by abandoning self-detection: the caller now
+states the SHA explicitly via `orbit_ref`, duplicating it in two places in
+the caller's YAML — the unavoidable cost of there being no framework-level
+way to avoid it.
 
 ---
 
