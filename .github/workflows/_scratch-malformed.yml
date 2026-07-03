@@ -1,0 +1,11 @@
+name: Scratch Malformed
+on:
+  push:
+jobs:
+  broken:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@thisisnotavalidsha
+        with
+          fetch-depth: 0
+      - run: echo "this yaml is deliberately malformed for a live actionlint QA proof"
