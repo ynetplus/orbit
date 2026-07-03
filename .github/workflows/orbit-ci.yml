@@ -45,21 +45,8 @@ jobs:
           echo "(shellcheck sub-linter disabled — matches ynetplus convention,"
           echo "scripts/pre-push-full-ci.sh 'actionlint -shellcheck='; this gate"
           echo "is for STRUCTURAL workflow correctness, not shell style nits)"
-          echo ""
-          echo "-ignore 'job_workflow_ref' below: known actionlint gap, not a"
-          echo "real error. actionlint's embedded github-context type schema"
-          echo "(current as of v1.7.11) does not yet include the"
-          echo "'job_workflow_ref' property, even though it is a real,"
-          echo "documented GitHub Actions context field (the one that resolves"
-          echo "to a CALLED reusable workflow's own coordinates, as opposed to"
-          echo "'workflow_ref' which resolves to the top-level caller's --"
-          echo "see migration-lock-risk.yml / supply-audit.yml / sast-semgrep.yml"
-          echo "header comments, CR-A079-8 fix-pass-2). Narrowly scoped to this"
-          echo "one message so no other real finding is masked."
           echo "=============================================================="
-          ./actionlint -color -shellcheck= \
-            -ignore 'property "job_workflow_ref" is not defined' \
-            .github/workflows/*.yml
+          ./actionlint -color -shellcheck= .github/workflows/*.yml
 
   yamllint:
     name: yamllint

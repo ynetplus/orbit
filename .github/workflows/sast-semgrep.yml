@@ -12,10 +12,13 @@
 # `rules_dir` / `baseline_file` inputs.
 #
 # Engine script provenance: see migration-lock-risk.yml's header comment for
-# the `github.job_workflow_ref` self-checkout mechanism — identical pattern
-# here. (Fixed CR-A079-8 fix-pass-2: was `github.workflow_ref`, which in a
-# `workflow_call` chain resolves to the CALLER's coordinates, not this called
-# workflow's — same bug as migration-lock-risk.yml.)
+# the `job.workflow_repository` / `job.workflow_sha` self-checkout mechanism
+# (via `toJSON(job)` + `jq`) — identical pattern here. (Fix history, same as
+# migration-lock-risk.yml: fix-pass-2 wrongly used `github.workflow_ref`
+# (top-level-caller coordinates, wrong context entirely) then
+# `github.job_workflow_ref` (not a real context property — silently
+# evaluates empty); fix-pass-3 corrects to the real documented field, the
+# `job` context.)
 #
 # GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
 
@@ -59,10 +62,11 @@ jobs:
 
       - name: Resolve orbit coordinates (self, pinned SHA)
         id: orbit_ref
+        env:
+          JOB_CTX: ${{ toJSON(job) }}
         run: |
-          WF_REF="${{ github.job_workflow_ref }}"
-          REPO="${WF_REF%%/.github/*}"
-          REF="${WF_REF##*@}"
+          REPO=$(echo "$JOB_CTX" | jq -r '.workflow_repository')
+          REF=$(echo "$JOB_CTX" | jq -r '.workflow_sha')
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
 
