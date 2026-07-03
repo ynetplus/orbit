@@ -17,6 +17,32 @@ Drew-signed-off 2026-06-27.
 
 ---
 
+## Consumer prerequisites
+
+Before any consumer repo's `uses: ynetplus/orbit/...@<sha>` calls will work,
+this repo's **Actions → General → Access** setting must be **"Accessible from
+repositories in the `ynetplus` organization"** (`access_level=organization`),
+not the GitHub default of "Not accessible" / repo-only:
+
+```bash
+gh api -X PUT repos/ynetplus/orbit/actions/permissions/access \
+  -f access_level=organization
+```
+
+**Symptom when this is wrong:** every consumer job that calls an Orbit
+reusable workflow fails immediately with an opaque, unhelpful error —
+GitHub reports it as a generic **"workflow file issue"** / "workflow was not
+found" on the caller side, with nothing in the log pointing at an access
+setting. It looks identical to a typo'd `uses:` path or a bad SHA pin, so
+don't assume the caller YAML is wrong before checking this setting.
+
+This is an org/repo-level setting on `ynetplus/orbit` itself (not something
+each consumer configures) — **already fixed live** as of this writing.
+Documented here so it isn't silently mis-set again and so the failure mode is
+recognizable if it ever regresses.
+
+---
+
 ## The contract: how to consume a workflow from this repo
 
 ### 1. Pin the full commit SHA — never a branch or tag
@@ -151,9 +177,11 @@ here" below).
 Tier 2's *engine* (this repo's `scripts/supply-run.sh` / `scripts/semgrep-run.sh`)
 is product-agnostic; your ruleset files and baseline counts are product data
 and stay in YOUR repo, passed in as paths. The reusable workflow self-checks-out
-this repo at the exact SHA it was invoked at (via `github.workflow_ref` — the
-same mechanism GitHub uses for OIDC `job_workflow_ref` trust scoping) to fetch
-the matching engine script version — no separate ref to keep in sync.
+this repo at the exact SHA it was invoked at (via `github.job_workflow_ref` —
+the context that resolves to the CALLED reusable workflow's own coordinates;
+`github.workflow_ref` without the `job_` prefix always resolves to the
+top-level CALLER's coordinates instead and must never be used for this) to
+fetch the matching engine script version — no separate ref to keep in sync.
 
 ---
 
@@ -215,3 +243,40 @@ see RN-019 §3 for why floating tags are explicitly rejected for this repo.
 is the live test of whether this README alone is sufficient for a fresh
 agent to wire a new product. If it wasn't, that CR's forge report should
 propose a fix to this file.)
+
+## Adoption notes (things that bite on first adoption, not covered above)
+
+**(a) `workflow_dispatch` only works once the workflow file is on the default
+branch.** This is a general GitHub Actions platform constraint, not an Orbit
+quirk, but it hits every consumer that tries to pre-merge-test a brand-new
+`workflow_dispatch`-triggered caller (e.g. `nightly-secrets-full-scan.yml`,
+`ci-health-watchdog.yml`, `branch-protection-drift-check.yml`,
+`pipeline-slo.yml`): `gh workflow run <file> --ref <feature-branch>` fails
+with `HTTP 404: workflow ... not found on the default branch`, regardless of
+`--ref`, until that workflow file exists on `main` (or whatever the repo's
+default branch is). Two honest ways to QA a new scheduled caller before it
+merges:
+- Add a temporary `push: branches: [<your-feature-branch>]` trigger to the
+  file, push, capture the run, then **remove the temp trigger** before the
+  final push — this exercises the identical job body (the reusable-workflow
+  call) that `workflow_dispatch` would, so it's a faithful proof, not a
+  workaround of the thing being tested.
+- Or accept that first-time `workflow_dispatch` QA happens **post-merge**,
+  once the file has landed on the default branch.
+(Onest CR-A079-10, Cairo CR-A079-11, and Control Tower CR-A079-12 all hit and
+independently worked around this the first way.)
+
+**(b) `branch-protection-drift-check.yml` needs a token your repo doesn't
+have by default.** It calls `GET /repos/{owner}/{repo}/branches/{branch}/protection`
+with `Administration: Read-only`, a permission the default `GITHUB_TOKEN` can
+never be granted (GitHub Actions tokens cap out below repo-Administration).
+Provision `secrets.BRANCH_PROTECTION_READONLY_TOKEN`: a **fine-grained
+personal access token**, scoped to your repo only, with **Administration:
+Read-only** and nothing else — minted interactively via the GitHub web UI
+(Settings → Developer settings → Fine-grained tokens), there is no API/CLI
+path to create it non-interactively. Until it's provisioned, the workflow
+fails with a documented, distinct error — `"🔑 AUTH/PERMISSION ERROR (not
+branch-protection drift)"` / `{"message":"Resource not accessible by
+integration","status":"403"}` — which is the correctly-wired failure mode,
+not real drift. Once the secret is set, the same run goes green with no code
+change.
