@@ -56,6 +56,8 @@ jobs:
   # ---- secret-detection: GREEN (fixture finding already in baseline) ----
   secret-detection-pass:
     uses: ./.github/workflows/secret-detection.yml
+    permissions:
+      contents: read
     with:
       baseline_path: self-test/fixtures/secrets/known.secrets.baseline
       base_ref: self-test/base
@@ -63,5 +65,7 @@ jobs:
   # ---- alembic-single-head: GREEN (1 head) ----
   alembic-single-head-pass:
     uses: ./.github/workflows/alembic-single-head.yml
+    permissions:
+      contents: read
     with:
       alembic_dir: self-test/fixtures/alembic-ok

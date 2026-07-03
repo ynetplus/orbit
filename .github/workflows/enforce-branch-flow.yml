@@ -27,6 +27,8 @@ jobs:
   enforce:
     name: Enforce Branch Flow
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Check PR Source Branch
         env:
