@@ -11,7 +11,7 @@ it.
 
 | Gate | What it catches | Evidence |
 |---|---|---|
-| `secret-detection.yml` | Committed secrets (API keys, tokens, private keys, high-entropy strings) in PR diffs | `ynetplus` CR-458 origin; entropy/keyword detection has no free-tier native equivalent (GHAS Secret Protection is a paid upgrade, RN-019 Decision 2: deferred). Live-proven both directions in this CR's `self-test.yml` (clean-fixture PASS / injected-AWS-key-fixture FAIL). |
+| `secret-detection.yml` | Committed secrets (API keys, tokens, private keys, high-entropy strings) in PR diffs | `ynetplus` CR-458 origin; entropy/keyword detection has no free-tier native equivalent (GHAS Secret Protection is a paid upgrade, RN-019 Decision 2: deferred). Live-proven both directions in this CR's `self-test.yml` (clean-fixture PASS / injected-AWS-key-fixture FAIL). `exclude_globs` (CR-A079-14 Part O / F4, Third Eye LED-041 F4) additionally live-proven both directions: an excluded path's fake secret is skipped (`secret-detection-exclude-globs-pass`) and a non-excluded fake secret still blocks (`secret-detection-exclude-globs-still-blocks-fail`). |
 | `nightly-secrets-full-scan.yml` | Secrets that slipped past the incremental PR scan (e.g. baseline edited without review, or a file the PR-time diff doesn't touch) | `ynetplus` CR-CI-021 — full-repo parity companion to the incremental PR gate; catches drift the incremental scan is structurally blind to. |
 | `aws-credentials-ban.yml` | Static `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` anywhere in `.github/workflows/`, i.e. any workflow not yet migrated to OIDC | `ynetplus` CR-242c — origin of the company's OIDC-only CI/CD policy; this gate is the enforcement backstop for that policy. |
 | `sast-bandit.yml` | Python SQL injection, shell injection, hardcoded passwords, insecure crypto (HIGH severity + HIGH confidence only) | `ynetplus` CR-458 — SAST coverage with no reliance on a paid code-scanning product; Bandit is the standard Python SAST tool. |
@@ -57,3 +57,14 @@ Per CR-A079-8's QA Scenarios:
 4. **README-only adoption** — CR-A079-11 (Cairo, no pre-existing `.github/`
    at all) is the live test that a fresh agent can wire a new product from
    this README alone.
+5. **`exclude_globs` (CR-A079-14 Part O / F4)** — proven live via
+   `secret-detection-exclude-globs-pass` (`self-test.yml`) and
+   `secret-detection-exclude-globs-still-blocks-fail`
+   (`self-test-red-path.yml`), both against
+   `self-test/fixtures/secrets/exclude-globs/injected-should-be-excluded.txt`
+   (excluded) and the pre-existing `self-test/fixtures/secrets/injected.txt`
+   (not excluded, sibling path). One `exclude_globs` pattern
+   (`self-test/fixtures/secrets/exclude-globs/*`) held constant across both
+   jobs; only the baseline differs (see `self-test.yml`'s header comment for
+   why `pass.secrets.baseline` — not `known.secrets.baseline` — is what
+   actually proves exclusion, not pre-baselining, keeps the PASS job green).

@@ -21,6 +21,28 @@
 #     has advanced since.
 #       - known.secrets.baseline already contains this exact finding → PASS (this workflow).
 #       - empty.secrets.baseline does not → FAIL (self-test-red-path.yml).
+#   - self-test/fixtures/secrets/exclude-globs/injected-should-be-excluded.txt
+#     — same fake AWS example key, added alongside injected.txt for the
+#     `exclude_globs` self-test (CR-A079-14 Part O / F4). This finding IS
+#     also added to known.secrets.baseline (so the plain secret-detection-pass
+#     job above, which passes no exclude_globs, isn't broken by this file's
+#     mere existence). The exclude_globs proof itself needs a baseline that
+#     does NOT already know about this file — that's
+#     self-test/fixtures/secrets/exclude-globs/pass.secrets.baseline, an
+#     otherwise-identical copy of known.secrets.baseline with that one entry
+#     omitted. One pattern, `self-test/fixtures/secrets/exclude-globs/*`,
+#     matches ONLY this fixture:
+#       - secret-detection-exclude-globs-pass (this workflow): the
+#         NOT-pre-baselined pass.secrets.baseline + that exclude_globs
+#         pattern → the fixture is never scanned at all → its otherwise-new
+#         finding never surfaces → PASS. (If exclude_globs were broken/inert,
+#         this job would go RED instead, since pass.secrets.baseline has no
+#         entry for it.)
+#       - secret-detection-exclude-globs-still-blocks-fail
+#         (self-test-red-path.yml): empty.secrets.baseline + the SAME
+#         exclude_globs pattern, but the sibling ../injected.txt is NOT
+#         matched by that pattern → still detected → FAIL. Proves
+#         exclude_globs doesn't silently widen past what it's told to match.
 #   - self-test/fixtures/alembic-{ok,conflict}/ — static Alembic version
 #     trees (1 head / 2 heads). alembic-single-head.yml doesn't diff
 #     anything — it just runs `alembic heads` in the given `alembic_dir` —
@@ -61,6 +83,18 @@ jobs:
     with:
       baseline_path: self-test/fixtures/secrets/known.secrets.baseline
       base_ref: self-test/base
+
+  # ---- secret-detection exclude_globs: GREEN (excluded path's fake secret
+  # is skipped, even against a baseline that has NO entry for it and would
+  # otherwise fail the job — see header comment) ----
+  secret-detection-exclude-globs-pass:
+    uses: ./.github/workflows/secret-detection.yml
+    permissions:
+      contents: read
+    with:
+      baseline_path: self-test/fixtures/secrets/exclude-globs/pass.secrets.baseline
+      base_ref: self-test/base
+      exclude_globs: "self-test/fixtures/secrets/exclude-globs/*"
 
   # ---- alembic-single-head: GREEN (1 head) ----
   alembic-single-head-pass:

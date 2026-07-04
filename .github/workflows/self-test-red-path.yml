@@ -35,6 +35,18 @@ jobs:
       baseline_path: self-test/fixtures/secrets/empty.secrets.baseline
       base_ref: self-test/base
 
+  # ---- secret-detection exclude_globs: RED (a DIFFERENT fake secret,
+  # OUTSIDE the exclude_globs pattern, still blocks — proves exclude_globs
+  # is scoped to what it names, not a silent full-repo widening) ----
+  secret-detection-exclude-globs-still-blocks-fail:
+    uses: ./.github/workflows/secret-detection.yml
+    permissions:
+      contents: read
+    with:
+      baseline_path: self-test/fixtures/secrets/empty.secrets.baseline
+      base_ref: self-test/base
+      exclude_globs: "self-test/fixtures/secrets/exclude-globs/*"
+
   # ---- alembic-single-head: RED (2 heads) ----
   alembic-single-head-fail:
     uses: ./.github/workflows/alembic-single-head.yml
