@@ -69,6 +69,19 @@ There is no moving major tag in this repo (unlike some marketplace actions);
 every consumer update is a deliberate SHA bump, ideally proposed by
 Dependabot once Orbit's release cadence stabilizes (see "Versioning" below).
 
+**Approved-SHA policy (the pin you should actually bump to):** the
+company-wide *approved* consumer SHA is NOT necessarily the same as Orbit
+`main`'s HEAD at any given moment — `main` can (and does) move ahead of the
+approved SHA between conformance reviews. The approved SHA is the one every
+consumer is expected to converge on (per the `orbit-consumer-conformance-bar`
+DEC — see keystone `kkm/products/ynetplus/decisions/`), and it only advances
+when a documented pin-bump procedure runs across all consumers, not on every
+individual orbit commit. Consumers should bump to a NEW commit only when
+following that documented procedure (or when Jonathan/the CR that ships an
+Orbit change explicitly says to) — never reflexively re-pin to `main`'s
+current tip just because it moved. Check the current approved SHA in the
+latest `CR-A079-*` conformance CR or ask before bumping opportunistically.
+
 ### 2. Every reusable workflow takes `inputs:` — read the table below
 
 Every workflow in `.github/workflows/` declares `on: workflow_call:` with a
@@ -166,6 +179,22 @@ here" below).
 | [`pipeline-slo.yml`](.github/workflows/pipeline-slo.yml) | Scheduled SLO watchdog — build-duration p95 / success-rate / queue-wait p95 | `watched_workflow`, threshold inputs |
 | [`repo-clean-check.yml`](.github/workflows/repo-clean-check.yml) | HARD BLOCK — no modified/untracked files survive your build/test steps | `paths` |
 | [`enforce-branch-flow.yml`](.github/workflows/enforce-branch-flow.yml) | HARD BLOCK — only `allowed_source` may PR into `protected_target` | `allowed_source`, `protected_target` |
+
+**`secret-detection.yml`'s `exclude_globs` format:** a comma- and/or
+whitespace-separated (spaces/tabs/newlines all work) list of shell-style glob
+patterns, e.g. `"fixtures/secrets/**, vendor/*.snap"` or one per line.
+Matched with Python's `fnmatch` against the FULL repo-relative path — a bare
+`*` matches across `/` too (it's a string glob, not a path-segment glob).
+Additive to the built-in excludes (`.secrets.baseline`, `.env`,
+`.env.example`, `*.lock`, `.git/`) — it can only exclude MORE, never
+un-exclude a built-in. Applied to both the changed-file selection
+(incremental-mode diff) and the detect-secrets scan invocation itself (all
+modes, including the full-repo fallback scan). **Guard:** a literal
+`*`/`**`, or any combination of patterns that would exclude every candidate
+file in a given scan, is rejected with a hard error rather than silently
+scanning nothing (`scripts/apply_exclude_globs.py`) — this is deliberate,
+not a bug, if you hit it: narrow your globs until at least one file remains
+scannable.
 
 ## Reusable workflows (Tier 2 — agnostic engine, your ruleset/baseline stays in your repo)
 
