@@ -15,10 +15,9 @@
 # `secrets.branch_protection_readonly_token` (a fine-grained PAT scoped to
 # the consumer repo only, "Administration: Read-only", nothing else) via
 # `secrets: inherit` or an explicit `secrets:` block on the caller's `uses:`.
-# Until provisioned, this job emits an auth-error WARNING and exits 0 —
-# an auth error is a credential-provisioning gap, NOT branch-protection
-# drift. Actual drift (where the token CAN read branch protection and the
-# contexts don't match) still exits 1 as a hard failure.
+# Until provisioned, this job fails with an auth error — that is a
+# credential-provisioning gap, NOT branch-protection drift (the log output
+# labels the two failure modes distinctly).
 #
 # GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
 
@@ -54,7 +53,6 @@ jobs:
           set -euo pipefail
 
           FAIL=0
-          AUTH_FAIL=0
 
           check_branch() {
             local branch="$1"
@@ -72,12 +70,11 @@ jobs:
                 echo "Provision secrets.branch_protection_readonly_token (fine-grained PAT,"
                 echo "repo-scoped, Administration: Read-only, nothing else) — see the TOKEN"
                 echo "NOTE at the top of this workflow file."
-                AUTH_FAIL=1
               else
                 echo "❌ FAILED to fetch required_status_checks for '${branch}':"
                 echo "${raw}"
-                FAIL=1
               fi
+              FAIL=1
               echo ""
               return
             fi
@@ -131,24 +128,12 @@ jobs:
             echo "=============================================================="
             echo "🔴 BRANCH PROTECTION DRIFT CHECK FAILED"
             echo ""
-            echo "A required-status-check context has drifted away from the"
-            echo "expected contract (see the per-branch log above for details)."
+            echo "Either (a) a real required-status-check context has drifted away"
+            echo "from the expected contract, or (b) this job's token lacks the"
+            echo "'Administration: Read-only' permission needed to check at all"
+            echo "(see the per-branch log above — the two cases are labeled distinctly)."
             echo "=============================================================="
             exit 1
-          fi
-
-          if [ "${AUTH_FAIL}" -ne 0 ]; then
-            echo "=============================================================="
-            echo "⚠️  BRANCH PROTECTION DRIFT CHECK: AUTH WARNING (soft pass)"
-            echo ""
-            echo "No drift was detected in branches that could be checked, but"
-            echo "one or more branches could not be verified because the token"
-            echo "lacks 'Administration: Read-only' permission. Provision"
-            echo "secrets.branch_protection_readonly_token (fine-grained PAT,"
-            echo "repo-scoped, Administration: Read-only) to enable full checking."
-            echo "See the TOKEN NOTE at the top of this workflow file."
-            echo "=============================================================="
-            exit 0
           fi
 
           echo "✅ Branch protection drift check passed — all branches match the expected contract."
