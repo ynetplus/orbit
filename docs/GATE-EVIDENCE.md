@@ -68,3 +68,17 @@ Per CR-A079-8's QA Scenarios:
    jobs; only the baseline differs (see `self-test.yml`'s header comment for
    why `pass.secrets.baseline` — not `known.secrets.baseline` — is what
    actually proves exclusion, not pre-baselining, keeps the PASS job green).
+
+## Cadence — `self-test-red-path.yml` (CR-A087-6 Part 3, LED-043)
+
+Prior to CR-A087-6, `self-test-red-path.yml` was `workflow_dispatch`-only:
+nothing forced a re-run after an engine-script change to `secret-detection.yml`
+or `alembic-single-head.yml`, so a regression in the "correctly blocks a bad
+fixture" behavior could go unnoticed indefinitely. It now also runs on a
+weekly `schedule:` (`cron: '0 6 * * 1'`, Monday 06:00 UTC) — deliberately
+weekly rather than nightly like `self-test.yml`'s PASS-path cron, since this
+is a self-test (not a product gate) whose expected outcome is a failed run;
+a nightly expected-failure entry would add Actions-history/notification
+noise for no meaningful reduction in the regression-detection window.
+`workflow_dispatch` is retained for on-demand verification immediately after
+a specific engine-script change.

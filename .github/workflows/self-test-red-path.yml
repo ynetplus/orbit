@@ -1,13 +1,25 @@
 # Orbit Self-Test — Live QA Proof (RED path)
 #
-# Companion to self-test.yml. This workflow is DISPATCH-ONLY and is EXPECTED
-# to end red — it proves the same two gates correctly BLOCK on a bad fixture,
-# which is the other half of "live fail+pass proof, both directions"
-# (CR-A079-8 QA Scenario 1/2). It is deliberately NOT wired to
-# pull_request/push/schedule so it can never appear as a required or
-# recurring check — a workflow whose successful outcome IS a failed run
-# would be confusing (and actively harmful) as a branch-protection context
-# or a nightly cron alert.
+# Companion to self-test.yml. This workflow is EXPECTED to end red — it
+# proves the same two gates correctly BLOCK on a bad fixture, which is the
+# other half of "live fail+pass proof, both directions" (CR-A079-8 QA
+# Scenario 1/2). It is deliberately NOT wired to pull_request/push so it can
+# never appear as a required branch-protection context — a workflow whose
+# successful outcome IS a failed run would be confusing (and actively
+# harmful) as a required check.
+#
+# LED-043 (Third Eye, 2026-07-05): dispatch-only meant nothing forced anyone
+# to actually re-run this after an engine-script change to secret-detection.yml
+# or alembic-single-head.yml — it relied on developer memory. CR-A087-6 Part 3
+# adds a weekly `schedule:` trigger so the red-path proof runs automatically.
+# Weekly (not nightly, unlike self-test.yml's PASS-path cron) is a deliberate
+# choice: this is a self-test, not a product gate, so the cost of a longer
+# regression-detection window is low, and a weekly cadence keeps the
+# expected-failure run from generating a nightly red entry in the Actions
+# history / notification stream — bounding "silent regression" to at most 7
+# days after an engine-script change is the goal, not minimizing it to zero.
+# `workflow_dispatch` stays for on-demand verification right after a specific
+# engine-script change, without waiting for the next scheduled run.
 #
 # How to run + verify:
 #   gh workflow run self-test-red-path.yml --repo ynetplus/orbit --ref main
@@ -20,10 +32,12 @@
 #
 # Fixture provenance: see self-test.yml's header comment (shared fixtures).
 
-name: Orbit Self-Test (Live QA Proof — RED path, dispatch-only)
+name: Orbit Self-Test (Live QA Proof — RED path, dispatch + weekly schedule)
 
 on:
   workflow_dispatch: {}
+  schedule:
+    - cron: '0 6 * * 1'   # weekly (Monday 06:00 UTC) — LED-043: no more relying on memory to re-run this
 
 jobs:
   # ---- secret-detection: RED (fixture finding NOT in baseline) ----
