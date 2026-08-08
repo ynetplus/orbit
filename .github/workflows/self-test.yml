@@ -90,7 +90,7 @@ on:
       - 'scripts/**'
       - 'self-test/**'
   push:
-    branches: [main, feature/CR-A079-15-deploy-engines]   # TEMP for CR-A079-15 pre-merge QA — remove feature branch before final push, README adoption-note (a)
+    branches: [main]
     paths:
       - '.github/workflows/**'
       - 'scripts/**'

@@ -49,8 +49,6 @@ on:
   workflow_dispatch: {}
   schedule:
     - cron: '0 6 * * 1'   # weekly (Monday 06:00 UTC) — LED-043: no more relying on memory to re-run this
-  push:
-    branches: [feature/CR-A079-15-deploy-engines]   # TEMP for CR-A079-15 pre-merge QA (README adoption-note a: workflow_dispatch only works once a workflow file is on the default branch) — remove before final push
 
 jobs:
   # ---- secret-detection: RED (fixture finding NOT in baseline) ----
