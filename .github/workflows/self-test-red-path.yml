@@ -26,11 +26,22 @@
 #   gh run list --repo ynetplus/orbit --workflow=self-test-red-path.yml --limit 1
 #   gh run view <run-id> --repo ynetplus/orbit --json conclusion,jobs
 #
-# Expected: overall run conclusion = failure; both jobs' conclusion = failure.
-# If either job comes back `success`, the corresponding reusable workflow has
+# Expected: overall run conclusion = failure; all jobs' conclusion = failure.
+# If any job comes back `success`, the corresponding reusable workflow has
 # a real bug (it failed to catch what its GATE-EVIDENCE.md row claims).
 #
 # Fixture provenance: see self-test.yml's header comment (shared fixtures).
+#
+# post-deploy-smoke-fail (CR-A079-15) is the CR's required red-path positive
+# control (L23): expects HTTP 200 against a URL that reliably returns 404
+# (a raw.githubusercontent.com path that does not exist — GitHub's own CDN,
+# not a third-party status-code-testing service; httpstat.us/404 was tried
+# first and returned a bare connection failure rather than a real 404
+# during this CR's own QA pass, which would have made the red path fail for
+# the wrong reason), with minimal retries/delay so the dispatch stays fast
+# — proves the gate actually BLOCKS a real deploy from being declared
+# healthy when the public edge is wrong, not just that it can report a
+# status.
 
 name: Orbit Self-Test (Live QA Proof — RED path, dispatch + weekly schedule)
 
@@ -68,3 +79,23 @@ jobs:
       contents: read
     with:
       alembic_dir: self-test/fixtures/alembic-conflict
+
+  # ---- post-deploy-smoke: RED (expects 200, URL reliably returns 404) ----
+  # (CR-A079-15) The required red-path positive control: proves the gate
+  # actually fails loudly rather than soft-passing when the public edge
+  # doesn't match the expected contract.
+  post-deploy-smoke-fail:
+    uses: ./.github/workflows/post-deploy-smoke.yml
+    permissions:
+      contents: read
+    with:
+      # A reliably-404 URL on infrastructure this repo already depends on
+      # (GitHub's own raw-content CDN), not a third-party status-code test
+      # service — those proved flaky in practice (httpstat.us returned a
+      # bare connection failure, not even a real 404, during CR-A079-15's
+      # own QA pass, which would have made this a false red for the wrong
+      # reason).
+      url: https://raw.githubusercontent.com/ynetplus/orbit/main/definitely-does-not-exist-file-xyz.txt
+      expected_status: "200"
+      retries: 2
+      retry_delay_seconds: 2

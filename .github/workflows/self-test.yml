@@ -49,6 +49,28 @@
 #     so both fixtures live side-by-side in every commit with no branch
 #     tricks needed; ok is tested here, conflict is tested in the red-path
 #     workflow.
+#   - self-test/fixtures/build-push-sha/Dockerfile — a trivial dummy image
+#     (CR-A079-15). build-push-sha.yml itself always does a real OIDC
+#     role-assume + ECR login + `push: true` — self-test has neither an AWS
+#     role nor an ECR repo to push to, and must not touch real infra. So the
+#     contract is validated two ways, both with ZERO AWS/ECR calls: (1)
+#     scripts/resolve-image-uri.sh — the exact tag-resolution logic the real
+#     workflow's "Resolve image URI" step calls — run directly against
+#     fixture inputs and asserted against the expected `<repo>:<sha>` output
+#     (no mutable-tag suffix, ever); (2) a local docker/build-push-action run
+#     against this fixture Dockerfile with `push: false` proves the
+#     Dockerfile/context/buildx leg builds cleanly. Neither step is
+#     `uses: ./.github/workflows/build-push-sha.yml` — that reusable
+#     workflow requires real `oidc_role_arn`/`ecr_repository` inputs this
+#     repo cannot provide from a self-test. The mutable-tag invariant
+#     (CR-A079-15 Invariant 2) is checked separately, scoped to the
+#     `docker/build-push-action` step's `with:` block — NOT a naive
+#     whole-file `grep latest`, which would false-positive on this file's
+#     own `runs-on: ubuntu-latest` (and every other workflow in this repo).
+#   - post-deploy-smoke-pass targets `https://example.com` (IANA-reserved,
+#     stable, always 200) — a real public URL, proving the gate's actual
+#     curl-with-retries path end-to-end; the matching red path (a known-404
+#     URL, expecting 200) lives in self-test-red-path.yml.
 #
 # actionlint's malformed-YAML catch (QA Scenario 3) is proven by orbit-ci.yml
 # itself on every PR that touches a workflow file — a live one-off PR with a
@@ -103,3 +125,147 @@ jobs:
       contents: read
     with:
       alembic_dir: self-test/fixtures/alembic-ok
+
+  # ---- build-push-sha: contract GREEN (mocked — no AWS/ECR call) ----
+  # (CR-A079-15) Validates the tag-resolution script + the Dockerfile/buildx
+  # leg in isolation, since the real reusable workflow needs a live OIDC
+  # role + ECR repo this self-test does not have and must not fake.
+  build-push-sha-contract:
+    name: build-push-sha contract (mocked push)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: resolve-image-uri.sh contract — bare repo name
+        run: |
+          set -euo pipefail
+          GOT=$(scripts/resolve-image-uri.sh "dummy-repo" "123456789012.dkr.ecr.us-east-1.amazonaws.com" "deadbeef00112233445566778899aabbccddeef")
+          EXPECT="123456789012.dkr.ecr.us-east-1.amazonaws.com/dummy-repo:deadbeef00112233445566778899aabbccddeef"
+          echo "got:    $GOT"
+          echo "expect: $EXPECT"
+          [ "$GOT" = "$EXPECT" ] || { echo "❌ resolve-image-uri.sh contract mismatch (bare repo name case)"; exit 1; }
+          case "$GOT" in *latest*) echo "❌ resolved URI contains a mutable tag substring"; exit 1 ;; esac
+          echo "✅ bare repo name → correctly qualified with registry, SHA-only tag"
+
+      - name: resolve-image-uri.sh contract — pre-qualified repo URI (idempotent)
+        run: |
+          set -euo pipefail
+          GOT=$(scripts/resolve-image-uri.sh "123456789012.dkr.ecr.us-east-1.amazonaws.com/dummy-repo" "123456789012.dkr.ecr.us-east-1.amazonaws.com" "deadbeef00112233445566778899aabbccddeef")
+          EXPECT="123456789012.dkr.ecr.us-east-1.amazonaws.com/dummy-repo:deadbeef00112233445566778899aabbccddeef"
+          echo "got:    $GOT"
+          echo "expect: $EXPECT"
+          [ "$GOT" = "$EXPECT" ] || { echo "❌ resolve-image-uri.sh contract mismatch (pre-qualified URI case)"; exit 1; }
+          echo "✅ already-qualified repo URI → not double-prefixed with the registry"
+
+      - name: Self-checkout contract — engine script resolves at the path the workflow actually uses (round-3, CR-A079-15)
+        run: |
+          set -euo pipefail
+          # Round-2 /proof REJECTED because build-push-sha.yml's "Resolve
+          # image URI" step called a bare `scripts/resolve-image-uri.sh`,
+          # which only exists because inside Orbit itself the consumer repo
+          # IS Orbit — in any real consumer it 404s. This step proves the
+          # FIX (self-checkout to _orbit-engine/, invoke
+          # _orbit-engine/scripts/...) two ways, so a future edit that
+          # reverts to a bare path fails HERE, not on a real consumer.
+
+          echo "1) build-push-sha.yml must carry the self-checkout steps..."
+          grep -q 'name: Resolve orbit coordinates (self, pinned SHA)' .github/workflows/build-push-sha.yml \
+            || { echo "❌ missing 'Resolve orbit coordinates' self-checkout step"; exit 1; }
+          grep -q 'name: Checkout orbit engine scripts (self, pinned)' .github/workflows/build-push-sha.yml \
+            || { echo "❌ missing 'Checkout orbit engine scripts' self-checkout step"; exit 1; }
+          echo "✅ self-checkout steps present"
+
+          echo "2) the resolve step must invoke the engine script under _orbit-engine/, never a bare path..."
+          RESOLVE_LINE=$(grep -n 'resolve-image-uri.sh' .github/workflows/build-push-sha.yml | grep -v '^[0-9]*: *#' | grep 'IMAGE_URI=')
+          echo "   $RESOLVE_LINE"
+          echo "$RESOLVE_LINE" | grep -q '_orbit-engine/scripts/resolve-image-uri.sh' \
+            || { echo "❌ build-push-sha.yml no longer calls the self-checked-out engine script path — this is the round-2 regression"; exit 1; }
+          echo "$RESOLVE_LINE" | grep -qE '\$\(scripts/resolve-image-uri\.sh|="scripts/resolve-image-uri\.sh' \
+            && { echo "❌ build-push-sha.yml calls a BARE scripts/ path — this is the round-2 regression"; exit 1; } || true
+          echo "✅ resolve step references _orbit-engine/scripts/resolve-image-uri.sh"
+
+          echo "3) simulate the self-checkout layout and prove the resolved path is actually runnable..."
+          mkdir -p _orbit-engine
+          cp -r scripts _orbit-engine/scripts
+          test -x _orbit-engine/scripts/resolve-image-uri.sh \
+            || { echo "❌ _orbit-engine/scripts/resolve-image-uri.sh not present/executable after simulated self-checkout"; exit 1; }
+          GOT=$(_orbit-engine/scripts/resolve-image-uri.sh "dummy-repo" "123456789012.dkr.ecr.us-east-1.amazonaws.com" "deadbeef00112233445566778899aabbccddeef")
+          EXPECT="123456789012.dkr.ecr.us-east-1.amazonaws.com/dummy-repo:deadbeef00112233445566778899aabbccddeef"
+          [ "$GOT" = "$EXPECT" ] || { echo "❌ engine script at the self-checkout path produced the wrong output"; exit 1; }
+          rm -rf _orbit-engine
+          echo "✅ engine script resolves and runs correctly at the exact path build-push-sha.yml references"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+
+      - name: Build fixture image locally, push disabled (no ECR, no AWS creds)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: self-test/fixtures/build-push-sha
+          file: self-test/fixtures/build-push-sha/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: false
+          tags: orbit-self-test/build-push-sha-fixture:mocked
+
+  # ---- build-push-sha: mutable-tag invariant, GREEN + positive control ----
+  # (CR-A079-15) Proves build-push-sha.yml's docker/build-push-action `tags:`
+  # field never carries a mutable tag, AND that the check itself would catch
+  # one if it were ever introduced (positive control — plant one in a
+  # scratch copy, confirm it's caught, discard the scratch copy).
+  build-push-sha-tag-invariant:
+    name: build-push-sha mutable-tag invariant (+ positive control)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Extract the docker/build-push-action step's pushed-tags block
+        id: extract
+        run: |
+          set -euo pipefail
+          awk '/uses: docker\/build-push-action/,/^\S/{print}' .github/workflows/build-push-sha.yml \
+            | grep -A5 'tags:' > .tags-block.txt || true
+          echo "--- extracted tags: block ---"
+          cat .tags-block.txt
+
+      - name: Real file — must be 0 mutable-tag matches
+        run: |
+          set -euo pipefail
+          COUNT=$(grep -c 'latest' .tags-block.txt || true)
+          echo "mutable-tag matches in real file's tags: block: $COUNT"
+          [ "$COUNT" -eq 0 ] || { echo "❌ build-push-sha.yml's pushed tags: block references a mutable tag"; exit 1; }
+          echo "✅ no mutable tag in the real file"
+
+      - name: Positive control — plant a mutable tag in a scratch copy, confirm it's caught
+        run: |
+          set -euo pipefail
+          cp .github/workflows/build-push-sha.yml /tmp/build-push-sha.scratch.yml
+          # Append a mutable-tag line right after the existing tags: line —
+          # deliberately NOT reconstructing the real expression syntax here
+          # (that would embed a GitHub Actions expression token in a run:
+          # script that this job's own context can't resolve).
+          sed -i '/^[[:space:]]*tags:/a\            some-registry/some-repo:latest' /tmp/build-push-sha.scratch.yml
+          awk '/uses: docker\/build-push-action/,/^\S/{print}' /tmp/build-push-sha.scratch.yml \
+            | grep -A5 'tags:' > /tmp/scratch-tags-block.txt || true
+          echo "--- scratch (planted) tags: block ---"
+          cat /tmp/scratch-tags-block.txt
+          COUNT=$(grep -c 'latest' /tmp/scratch-tags-block.txt || true)
+          echo "mutable-tag matches in scratch copy: $COUNT"
+          [ "$COUNT" -gt 0 ] || { echo "❌ positive control FAILED — planted mutable tag was not caught"; exit 1; }
+          rm -f /tmp/build-push-sha.scratch.yml /tmp/scratch-tags-block.txt
+          echo "✅ positive control caught the planted mutable tag — the check is not a tautology"
+
+  # ---- post-deploy-smoke: GREEN (real public URL, 200) ----
+  post-deploy-smoke-pass:
+    uses: ./.github/workflows/post-deploy-smoke.yml
+    permissions:
+      contents: read
+    with:
+      url: https://example.com
+      expected_status: "200"
+      retries: 3
+      retry_delay_seconds: 5

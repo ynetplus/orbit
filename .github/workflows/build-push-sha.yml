@@ -1,0 +1,164 @@
+# Orbit — Build & Push (SHA-Immutable)
+#
+# NEW engine (CR-A079-15) — not extracted from an existing ynetplus workflow
+# like most of this repo's gates. Origin: the 2026-08-08 Onest-SRE
+# infrastructure audit (`kkm/products/onest/audits/2026-08-08-mahmoud-infra-vs-orbit-reference-audit.md`,
+# §3 item 5) found Mahmoud's independently-built `app-deploy.yml` tags ECR
+# images by commit SHA ONLY — no `latest`, no `{env}-latest` — where our own
+# reference (`ynetplus` `deploy-production.yml`/`deploy-staging.yml`) still
+# pushes a SHA tag alongside `latest`/`production-latest` mutable tags. A
+# mutable tag can be silently re-pointed after review (the same class of
+# supply-chain risk RN-019 cites for Action refs, `tj-actions/changed-files`
+# CVE-2025-30066); this workflow makes the immutable-tag-only pattern a
+# shared Orbit primitive so every consumer can adopt it without re-deriving
+# it. Consumers keep the deployed *reference* (a running task/instance
+# pointing at a tag) mutable — only the IMAGE TAG ITSELF must never move.
+#
+# OIDC only: no static-credential inputs or secrets anywhere in this file —
+# `aws-credentials-ban.yml` (this repo's own gate) enforces that on Orbit
+# itself. `role-to-assume` takes an IAM role ARN, which is not a secret value
+# (it is visible in the AWS console/CloudTrail to anyone with read access to
+# the account) — the trust POLICY on that role is what does the actual
+# access control; see docs/OIDC-TRUST.md for how to scope it correctly.
+#
+# SELF-CHECKOUT (round-3 fix, CR-A079-15): the "Resolve image URI" step below
+# runs scripts/resolve-image-uri.sh — an Orbit-owned engine script. A bare
+# `actions/checkout` in a workflow_call chain clones the CALLER's repo, not
+# Orbit's, so without a self-checkout the script does not exist in any
+# consumer's workspace and this step dies with "No such file or directory" on
+# every real invocation (round-2 /proof REJECTED on exactly this — the same
+# failure class this repo already found and fixed twice in
+# migration-lock-risk.yml, see that file's own HISTORY comment and commits
+# 101fb0b/09e10be). Follows this repo's canonical pattern exactly: `job`
+# context's `workflow_repository`/`workflow_sha` fields identify the CALLED
+# reusable workflow's own coordinates (Orbit, pinned to the consumer's
+# `uses: ynetplus/orbit/...@<sha>` pin) — read via `toJSON(job)` + `jq`
+# because actionlint's `job`-context schema doesn't yet list these documented
+# fields. The script is then invoked at `_orbit-engine/scripts/...`, never a
+# bare `scripts/...`.
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — Build & Push (SHA-Immutable)
+
+on:
+  workflow_call:
+    inputs:
+      ecr_repository:
+        description: "ECR repository name (or full URI including registry — this workflow does not assume one over the other; if a bare name is given, the registry from aws-actions/amazon-ecr-login is prepended)."
+        type: string
+        required: true
+      aws_region:
+        description: "AWS region the ECR repository lives in."
+        type: string
+        required: true
+      oidc_role_arn:
+        description: "IAM role ARN to assume via OIDC (aws-actions/configure-aws-credentials role-to-assume). Not a secret — the role's trust policy is the control, see docs/OIDC-TRUST.md."
+        type: string
+        required: true
+      context_path:
+        description: "Docker build context path."
+        type: string
+        default: "."
+      dockerfile:
+        description: "Path to the Dockerfile, relative to the WORKSPACE ROOT (docker/build-push-action's `file` input is always workspace-relative, regardless of context_path — e.g. context_path: ./backend still takes dockerfile: ./backend/Dockerfile, not just 'Dockerfile')."
+        type: string
+        default: "Dockerfile"
+      platform:
+        description: "Target platform for docker/build-push-action."
+        type: string
+        default: "linux/amd64"
+    outputs:
+      image_uri:
+        description: "Full image URI pushed, tagged with the full 40-char commit SHA only (<registry>/<repo>:<sha>)."
+        value: ${{ jobs.build.outputs.image_uri }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & Push (SHA tag only)
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC token exchange — the only auth this workflow uses
+      contents: read
+    outputs:
+      image_uri: ${{ steps.set-output.outputs.image_uri }}
+    steps:
+      - name: Checkout consumer repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Resolve orbit coordinates (self, pinned SHA)
+        id: orbit_ref
+        env:
+          JOB_CTX: ${{ toJSON(job) }}
+        run: |
+          REPO=$(echo "$JOB_CTX" | jq -r '.workflow_repository')
+          REF=$(echo "$JOB_CTX" | jq -r '.workflow_sha')
+          echo "Resolved orbit repo=$REPO ref=$REF (from job.workflow_repository / job.workflow_sha)"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout orbit engine scripts (self, pinned)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ${{ steps.orbit_ref.outputs.repo }}
+          ref: ${{ steps.orbit_ref.outputs.ref }}
+          path: _orbit-engine
+          persist-credentials: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
+        with:
+          role-to-assume: ${{ inputs.oidc_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64  # v2.1.6
+
+      - name: Resolve image URI (SHA tag only — no mutable tags, ever)
+        id: resolve
+        env:
+          ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          # Shared with self-test.yml's build-push-sha-contract job (same
+          # script, fixture inputs, no AWS credentials needed there) — one
+          # source of truth for the tag-resolution contract. Invoked from the
+          # self-checkout path (_orbit-engine/), never a bare `scripts/...` —
+          # a bare path resolves against the CONSUMER's checkout, which does
+          # not carry Orbit's own scripts (round-3 fix, CR-A079-15).
+          IMAGE_URI=$(_orbit-engine/scripts/resolve-image-uri.sh "$ECR_REPOSITORY" "$REGISTRY" "$GITHUB_SHA")
+          echo "Resolved image URI: $IMAGE_URI"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+
+      - name: Build and push (SHA tag ONLY — no latest, no mutable tags)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ${{ inputs.context_path }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platform }}
+          push: true
+          tags: ${{ steps.resolve.outputs.image_uri }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Emit job output
+        id: set-output
+        run: |
+          echo "image_uri=${{ steps.resolve.outputs.image_uri }}" >> "$GITHUB_OUTPUT"
+          echo "=============================================================="
+          echo "✅ Pushed: ${{ steps.resolve.outputs.image_uri }}"
+          echo "   (SHA-immutable — no 'latest'/mutable tag was pushed)"
+          echo "=============================================================="
+          {
+            echo "### Orbit — Build & Push (SHA-Immutable)"
+            echo ""
+            echo "**Image pushed:** \`${{ steps.resolve.outputs.image_uri }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
