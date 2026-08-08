@@ -73,6 +73,23 @@ Per CR-A079-15's QA Scenarios:
    AWS/ECR call is made — the real workflow's OIDC role-assume + ECR login +
    `push: true` steps require live credentials this self-test does not have
    and must not fake.
+   **Round-3 addition (2026-08-08, post round-2 /proof REJECTED):** the same
+   job now also runs a "Self-checkout contract" step that (a) asserts
+   `build-push-sha.yml` carries the self-checkout steps ("Resolve orbit
+   coordinates" / "Checkout orbit engine scripts", the same
+   `job.workflow_repository`/`job.workflow_sha` pattern already proven in
+   `migration-lock-risk.yml`), (b) asserts its "Resolve image URI" step
+   invokes `_orbit-engine/scripts/resolve-image-uri.sh`, never a bare
+   `scripts/...` path, and (c) simulates the self-checkout layout
+   (`_orbit-engine/`) and actually runs the engine script from there,
+   proving the exact path the workflow references is executable. Round 2
+   found that a bare `scripts/resolve-image-uri.sh` call only worked inside
+   Orbit's own self-test (where the "consumer" happens to be Orbit itself)
+   and would 404 with "No such file or directory" on every real consumer
+   invocation — the same failure class `migration-lock-risk.yml`'s own
+   HISTORY comment documents being found and fixed twice already (commits
+   101fb0b, 09e10be). This step exists so a future edit that regresses back
+   to a bare path fails self-test, not a consumer's first adoption.
 2. **mutable-tag invariant, with positive control** — proven live via
    `build-push-sha-tag-invariant` (`self-test.yml`): the real file's
    `docker/build-push-action` `tags:` block has 0 `latest` matches, AND a

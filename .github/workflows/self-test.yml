@@ -159,6 +159,44 @@ jobs:
           [ "$GOT" = "$EXPECT" ] || { echo "❌ resolve-image-uri.sh contract mismatch (pre-qualified URI case)"; exit 1; }
           echo "✅ already-qualified repo URI → not double-prefixed with the registry"
 
+      - name: Self-checkout contract — engine script resolves at the path the workflow actually uses (round-3, CR-A079-15)
+        run: |
+          set -euo pipefail
+          # Round-2 /proof REJECTED because build-push-sha.yml's "Resolve
+          # image URI" step called a bare `scripts/resolve-image-uri.sh`,
+          # which only exists because inside Orbit itself the consumer repo
+          # IS Orbit — in any real consumer it 404s. This step proves the
+          # FIX (self-checkout to _orbit-engine/, invoke
+          # _orbit-engine/scripts/...) two ways, so a future edit that
+          # reverts to a bare path fails HERE, not on a real consumer.
+
+          echo "1) build-push-sha.yml must carry the self-checkout steps..."
+          grep -q 'name: Resolve orbit coordinates (self, pinned SHA)' .github/workflows/build-push-sha.yml \
+            || { echo "❌ missing 'Resolve orbit coordinates' self-checkout step"; exit 1; }
+          grep -q 'name: Checkout orbit engine scripts (self, pinned)' .github/workflows/build-push-sha.yml \
+            || { echo "❌ missing 'Checkout orbit engine scripts' self-checkout step"; exit 1; }
+          echo "✅ self-checkout steps present"
+
+          echo "2) the resolve step must invoke the engine script under _orbit-engine/, never a bare path..."
+          RESOLVE_LINE=$(grep -n 'resolve-image-uri.sh' .github/workflows/build-push-sha.yml | grep -v '^[0-9]*: *#' | grep 'IMAGE_URI=')
+          echo "   $RESOLVE_LINE"
+          echo "$RESOLVE_LINE" | grep -q '_orbit-engine/scripts/resolve-image-uri.sh' \
+            || { echo "❌ build-push-sha.yml no longer calls the self-checked-out engine script path — this is the round-2 regression"; exit 1; }
+          echo "$RESOLVE_LINE" | grep -qE '\$\(scripts/resolve-image-uri\.sh|="scripts/resolve-image-uri\.sh' \
+            && { echo "❌ build-push-sha.yml calls a BARE scripts/ path — this is the round-2 regression"; exit 1; } || true
+          echo "✅ resolve step references _orbit-engine/scripts/resolve-image-uri.sh"
+
+          echo "3) simulate the self-checkout layout and prove the resolved path is actually runnable..."
+          mkdir -p _orbit-engine
+          cp -r scripts _orbit-engine/scripts
+          test -x _orbit-engine/scripts/resolve-image-uri.sh \
+            || { echo "❌ _orbit-engine/scripts/resolve-image-uri.sh not present/executable after simulated self-checkout"; exit 1; }
+          GOT=$(_orbit-engine/scripts/resolve-image-uri.sh "dummy-repo" "123456789012.dkr.ecr.us-east-1.amazonaws.com" "deadbeef00112233445566778899aabbccddeef")
+          EXPECT="123456789012.dkr.ecr.us-east-1.amazonaws.com/dummy-repo:deadbeef00112233445566778899aabbccddeef"
+          [ "$GOT" = "$EXPECT" ] || { echo "❌ engine script at the self-checkout path produced the wrong output"; exit 1; }
+          rm -rf _orbit-engine
+          echo "✅ engine script resolves and runs correctly at the exact path build-push-sha.yml references"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
 

@@ -21,6 +21,22 @@
 # the account) — the trust POLICY on that role is what does the actual
 # access control; see docs/OIDC-TRUST.md for how to scope it correctly.
 #
+# SELF-CHECKOUT (round-3 fix, CR-A079-15): the "Resolve image URI" step below
+# runs scripts/resolve-image-uri.sh — an Orbit-owned engine script. A bare
+# `actions/checkout` in a workflow_call chain clones the CALLER's repo, not
+# Orbit's, so without a self-checkout the script does not exist in any
+# consumer's workspace and this step dies with "No such file or directory" on
+# every real invocation (round-2 /proof REJECTED on exactly this — the same
+# failure class this repo already found and fixed twice in
+# migration-lock-risk.yml, see that file's own HISTORY comment and commits
+# 101fb0b/09e10be). Follows this repo's canonical pattern exactly: `job`
+# context's `workflow_repository`/`workflow_sha` fields identify the CALLED
+# reusable workflow's own coordinates (Orbit, pinned to the consumer's
+# `uses: ynetplus/orbit/...@<sha>` pin) — read via `toJSON(job)` + `jq`
+# because actionlint's `job`-context schema doesn't yet list these documented
+# fields. The script is then invoked at `_orbit-engine/scripts/...`, never a
+# bare `scripts/...`.
+#
 # GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
 
 name: Orbit — Build & Push (SHA-Immutable)
@@ -45,7 +61,7 @@ on:
         type: string
         default: "."
       dockerfile:
-        description: "Path to the Dockerfile, relative to context_path unless it starts with '/' or './'."
+        description: "Path to the Dockerfile, relative to the WORKSPACE ROOT (docker/build-push-action's `file` input is always workspace-relative, regardless of context_path — e.g. context_path: ./backend still takes dockerfile: ./backend/Dockerfile, not just 'Dockerfile')."
         type: string
         default: "Dockerfile"
       platform:
@@ -70,8 +86,26 @@ jobs:
     outputs:
       image_uri: ${{ steps.set-output.outputs.image_uri }}
     steps:
-      - name: Checkout code
+      - name: Checkout consumer repo
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Resolve orbit coordinates (self, pinned SHA)
+        id: orbit_ref
+        env:
+          JOB_CTX: ${{ toJSON(job) }}
+        run: |
+          REPO=$(echo "$JOB_CTX" | jq -r '.workflow_repository')
+          REF=$(echo "$JOB_CTX" | jq -r '.workflow_sha')
+          echo "Resolved orbit repo=$REPO ref=$REF (from job.workflow_repository / job.workflow_sha)"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout orbit engine scripts (self, pinned)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ${{ steps.orbit_ref.outputs.repo }}
+          ref: ${{ steps.orbit_ref.outputs.ref }}
+          path: _orbit-engine
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
@@ -92,8 +126,11 @@ jobs:
           set -euo pipefail
           # Shared with self-test.yml's build-push-sha-contract job (same
           # script, fixture inputs, no AWS credentials needed there) — one
-          # source of truth for the tag-resolution contract.
-          IMAGE_URI=$(scripts/resolve-image-uri.sh "$ECR_REPOSITORY" "$REGISTRY" "$GITHUB_SHA")
+          # source of truth for the tag-resolution contract. Invoked from the
+          # self-checkout path (_orbit-engine/), never a bare `scripts/...` —
+          # a bare path resolves against the CONSUMER's checkout, which does
+          # not carry Orbit's own scripts (round-3 fix, CR-A079-15).
+          IMAGE_URI=$(_orbit-engine/scripts/resolve-image-uri.sh "$ECR_REPOSITORY" "$REGISTRY" "$GITHUB_SHA")
           echo "Resolved image URI: $IMAGE_URI"
           echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
 
