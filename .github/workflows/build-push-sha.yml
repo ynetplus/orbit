@@ -106,6 +106,7 @@ jobs:
           repository: ${{ steps.orbit_ref.outputs.repo }}
           ref: ${{ steps.orbit_ref.outputs.ref }}
           path: _orbit-engine
+          persist-credentials: false
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
