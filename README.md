@@ -179,6 +179,8 @@ here" below).
 | [`pipeline-slo.yml`](.github/workflows/pipeline-slo.yml) | Scheduled SLO watchdog — build-duration p95 / success-rate / queue-wait p95 | `watched_workflow`, threshold inputs |
 | [`repo-clean-check.yml`](.github/workflows/repo-clean-check.yml) | HARD BLOCK — no modified/untracked files survive your build/test steps | `paths` |
 | [`enforce-branch-flow.yml`](.github/workflows/enforce-branch-flow.yml) | HARD BLOCK — only `allowed_source` may PR into `protected_target` | `allowed_source`, `protected_target` |
+| [`build-push-sha.yml`](.github/workflows/build-push-sha.yml) | Build a container image and push to ECR tagged with the full commit SHA ONLY — no `latest`, no mutable tags. OIDC-only auth. | `ecr_repository`, `aws_region`, `oidc_role_arn`, `context_path`, `dockerfile`, `platform` → output `image_uri` |
+| [`post-deploy-smoke.yml`](.github/workflows/post-deploy-smoke.yml) | Post-deploy smoke test against the REAL public URL (not an internal health port) — retries + TLS check + captured response in the step summary | `url`, `expected_status`, `expected_body_regex`, `retries`, `retry_delay_seconds`, `fail_on_tls_error` |
 
 **`secret-detection.yml`'s `exclude_globs` format:** a comma- and/or
 whitespace-separated (spaces/tabs/newlines all work) list of shell-style glob
@@ -216,6 +218,18 @@ in sync.
 
 ---
 
+## OIDC trust scoping
+
+`build-push-sha.yml` (and any other OIDC-authenticated workflow you wire)
+takes an IAM role ARN as an input, never a static credential — but an ARN is
+only as safe to hand out as the trust POLICY on that role. See
+[`docs/OIDC-TRUST.md`](docs/OIDC-TRUST.md) for the canonical trust-condition
+template (per-repo, per-ref/environment `sub` scoping), the one-role-per-
+pipeline-purpose rule, and the anti-patterns to avoid (wildcard `sub`,
+shared cross-repo roles, standing static keys) — written up after the
+2026-08-08 Onest infra audit found two OIDC deploy roles in the same account
+scoped inconsistently with no documented reason.
+
 ## What does NOT belong here
 
 - **No secrets.** No product credentials, tokens, or API keys — ever.
@@ -228,10 +242,34 @@ in sync.
 
 ## Versioning
 
-No moving major tag yet (RN-019 Decision — `main` + full-SHA pin only, at
-this repo's current size). If Orbit outgrows manual SHA bumps, the next step
+**SHA pin stays canonical for consumers — tags are a human-readable release
+marker, not a new way to consume this repo.** Every `uses:` line in every
+consumer still pins the full 40-character commit SHA
+(`@<sha>  # orbit-pin: ...`), exactly as described in [§1](#1-pin-the-full-commit-sha--never-a-branch-or-tag)
+above. RN-019's rejection of floating major tags (`@v1`, `@main`) as a
+*consumption* mechanism is unchanged by this section — a tag here is a
+bookmark onto an immutable commit, for humans reading release history, not a
+ref anyone should put in a `uses:` line. **Tag-pinning is mutable-adjacent**
+in the sense that matters for supply-chain risk: an org admin *can*
+re-point a tag (unlike a SHA), so treating a tag as if it were as safe to
+pin as a SHA would quietly reopen the exact CVE-2025-30066 class of risk
+RN-019 exists to close. Pin SHAs. Always.
+
+Starting with this CR, `main` gets semver tags + GitHub Releases at
+meaningful milestones, purely as a changelog/discovery aid:
+
+- `v1.0.0` — back-tagged at `09e10be` (the commit `main` was at when
+  CR-A079-15 started), marking the framework's state through CR-A079-8..14
+  (13 workflows, hardening rounds, secret-detection self-test fixtures).
+- `v1.1.0` — tagged at the commit that merges CR-A079-15 (deploy engines +
+  OIDC-trust doc + this versioning scheme).
+
+Tag creation and the GitHub Release notes are an `/release`-time action
+(server-side, at merge — never something a build step does), not something
+this CR's code performs. If Orbit outgrows manual SHA bumps, the next step
 is a Dependabot-managed `uses:` update PR per consumer, not a floating tag —
-see RN-019 §3 for why floating tags are explicitly rejected for this repo.
+see RN-019 §3 for why floating tags are explicitly rejected as a consumption
+mechanism for this repo.
 
 ## Testing a change to this repo
 

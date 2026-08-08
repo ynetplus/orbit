@@ -1,0 +1,169 @@
+# Orbit — Post-Deploy Smoke (Public URL)
+#
+# NEW engine (CR-A079-15) — not extracted from an existing ynetplus workflow.
+# Origin: the 2026-08-08 Onest-SRE infrastructure audit
+# (`kkm/products/onest/audits/2026-08-08-mahmoud-infra-vs-orbit-reference-audit.md`,
+# §2 "Real smoke test through the public URL, not just container health")
+# found Mahmoud's `app-deploy.yml`/`deploy.yml` explicitly curl the PUBLIC
+# hostname post-deploy, citing in-file the exact failure class this repo's
+# own lessons register also documents generically: a container can report
+# healthy on its internal port while the public edge (LB/CDN/DNS/reverse
+# proxy/cert) serves errors for days with every deploy still reporting green
+# (`feedback_alive_but_wedged_supervise_the_service.md` — "KeepAlive proves a
+# process, not a function"). This workflow makes that check a shared Orbit
+# primitive: it must hit the REAL external URL, never an internal health
+# port, or it proves nothing about what a customer actually sees.
+#
+# GATE-EVIDENCE: see docs/GATE-EVIDENCE.md in this repo.
+
+name: Orbit — Post-Deploy Smoke (Public URL)
+
+on:
+  workflow_call:
+    inputs:
+      url:
+        description: "Public URL to smoke-test (must be internet-reachable — an internal/VPC-only health endpoint defeats the point of this gate)."
+        type: string
+        required: true
+      expected_status:
+        description: "HTTP status code the URL must return."
+        type: string
+        default: "200"
+      expected_body_regex:
+        description: "Optional extended-regex (grep -E) the response body must match. Empty = body not checked."
+        type: string
+        default: ""
+      retries:
+        description: "Number of attempts before failing (deploys can take a few seconds to propagate through an LB/CDN)."
+        type: number
+        default: 10
+      retry_delay_seconds:
+        description: "Seconds to wait between retries."
+        type: number
+        default: 15
+      fail_on_tls_error:
+        description: "Fail on TLS/cert errors (true, default) vs tolerate them with curl --insecure (false — only for known self-signed staging edges; never use for a production URL)."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke test (public edge)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Curl the public URL with retries
+        id: smoke
+        env:
+          URL: ${{ inputs.url }}
+          EXPECTED_STATUS: ${{ inputs.expected_status }}
+          EXPECTED_BODY_REGEX: ${{ inputs.expected_body_regex }}
+          RETRIES: ${{ inputs.retries }}
+          RETRY_DELAY: ${{ inputs.retry_delay_seconds }}
+          FAIL_ON_TLS_ERROR: ${{ inputs.fail_on_tls_error }}
+        run: |
+          set -uo pipefail
+          echo "=============================================================="
+          echo "🌐 POST-DEPLOY SMOKE (public edge — Orbit)"
+          echo "=============================================================="
+          echo "URL:              $URL"
+          echo "Expected status:  $EXPECTED_STATUS"
+          echo "Expected body:    ${EXPECTED_BODY_REGEX:-<not checked>}"
+          echo "Retries:          $RETRIES (every ${RETRY_DELAY}s)"
+          echo "TLS strict:       $FAIL_ON_TLS_ERROR"
+          echo ""
+
+          CURL_TLS_ARGS=()
+          if [ "$FAIL_ON_TLS_ERROR" != "true" ]; then
+            CURL_TLS_ARGS+=("--insecure")
+            echo "⚠️  TLS errors tolerated (fail_on_tls_error=false) — do not use this for production."
+          fi
+
+          ATTEMPT=0
+          PASS=0
+          LAST_STATUS=""
+          LAST_BODY_FILE="$(mktemp)"
+          LAST_HEADERS_FILE="$(mktemp)"
+
+          while [ "$ATTEMPT" -lt "$RETRIES" ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "--- Attempt $ATTEMPT/$RETRIES ---"
+
+            HTTP_STATUS=$(curl -sS "${CURL_TLS_ARGS[@]}" \
+              --max-time 20 \
+              -D "$LAST_HEADERS_FILE" \
+              -o "$LAST_BODY_FILE" \
+              -w '%{http_code}' \
+              "$URL" 2>"${LAST_BODY_FILE}.curl-stderr") || HTTP_STATUS="curl-error"
+            LAST_STATUS="$HTTP_STATUS"
+
+            if [ "$HTTP_STATUS" = "$EXPECTED_STATUS" ]; then
+              if [ -n "$EXPECTED_BODY_REGEX" ]; then
+                if grep -qE "$EXPECTED_BODY_REGEX" "$LAST_BODY_FILE"; then
+                  echo "✅ Status $HTTP_STATUS matched, body matched /$EXPECTED_BODY_REGEX/"
+                  PASS=1
+                  break
+                else
+                  echo "❌ Status $HTTP_STATUS matched but body did NOT match /$EXPECTED_BODY_REGEX/"
+                fi
+              else
+                echo "✅ Status $HTTP_STATUS matched (body not checked)"
+                PASS=1
+                break
+              fi
+            else
+              echo "❌ Status was '$HTTP_STATUS', expected '$EXPECTED_STATUS'"
+              if [ -s "${LAST_BODY_FILE}.curl-stderr" ]; then
+                echo "   curl stderr:"
+                sed 's/^/   /' "${LAST_BODY_FILE}.curl-stderr"
+              fi
+            fi
+
+            if [ "$ATTEMPT" -lt "$RETRIES" ]; then
+              echo "   retrying in ${RETRY_DELAY}s..."
+              sleep "$RETRY_DELAY"
+            fi
+          done
+
+          echo ""
+          echo "=============================================================="
+          echo "CAPTURED RESPONSE (last attempt)"
+          echo "=============================================================="
+          echo "--- headers ---"
+          cat "$LAST_HEADERS_FILE" || true
+          echo "--- body (first 2000 bytes) ---"
+          head -c 2000 "$LAST_BODY_FILE" || true
+          echo ""
+          echo "=============================================================="
+
+          {
+            echo "### Orbit — Post-Deploy Smoke (Public URL)"
+            echo ""
+            echo "**URL:** \`$URL\`  **Expected status:** \`$EXPECTED_STATUS\`  **Last status:** \`$LAST_STATUS\`  **Attempts:** $ATTEMPT/$RETRIES"
+            echo ""
+            echo "<details><summary>Captured response headers</summary>"
+            echo ""
+            echo '```'
+            cat "$LAST_HEADERS_FILE" 2>/dev/null || true
+            echo '```'
+            echo "</details>"
+            echo ""
+            echo "<details><summary>Captured response body (first 2000 bytes)</summary>"
+            echo ""
+            echo '```'
+            head -c 2000 "$LAST_BODY_FILE" 2>/dev/null || true
+            echo ""
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$PASS" -ne 1 ]; then
+            echo "❌ SMOKE FAILED — public URL never matched the expected contract after $RETRIES attempt(s)."
+            exit 1
+          fi
+
+          echo "✅ SMOKE PASSED after $ATTEMPT attempt(s)."

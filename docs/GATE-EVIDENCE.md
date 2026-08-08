@@ -24,6 +24,8 @@ it.
 | `enforce-branch-flow.yml` | A PR into the protected target branch from anywhere other than the one allowed promotion branch (prevents skip-stage direct-to-main merges) | `ynetplus` `gate-stage-to-main.yml`, LOCKED deployment-pipeline-contract v1.0 — the single-lane promotion invariant every release depends on. |
 | `sast-semgrep.yml` (Tier 2) | Whatever the CONSUMER's own Semgrep ruleset encodes (in `ynetplus`: tenant-slug hardcoding, default-tenant symbol leaks, unsanitized public-route exceptions) | `ynetplus` CR-A055-1 — the engine is generic; the catch depends entirely on the ruleset each product brings. Engine correctness (finds/counts findings, diffs against baseline, emits SARIF) is the part Orbit owns and is covered by this CR's extraction review. |
 | `supply-audit.yml` (Tier 2) | Whatever Trivy (IaC misconfig + FS dependency scan) and pip-audit (Python SCA) find against the CONSUMER's own infra/backend trees | `ynetplus` CR-A078-3 — the engine (scan, diff-vs-baseline, aggregate, optional Snyk) is generic; findings depend on each product's actual infra/dependency tree. |
+| `build-push-sha.yml` | A container image pushed under a MUTABLE tag (`latest`, `{env}-latest`) that can be silently re-pointed after review — enforces SHA-only immutable tags, OIDC-only auth | CR-A079-15, direct response to the 2026-08-08 Onest-SRE infra audit finding that an independently-built deploy pipeline (`app-deploy.yml`) tags SHA-only where our own reference (`deploy-production.yml`/`deploy-staging.yml`) still pushes `latest`/`{env}-latest` alongside the SHA tag. Live-proven via `self-test.yml`'s `build-push-sha-contract` (tag-resolution script + local build, mocked push) and `build-push-sha-tag-invariant` (0-mutable-tags assertion + positive control that plants one and confirms it's caught). |
+| `post-deploy-smoke.yml` | A deploy that reports green while the PUBLIC edge (LB/CDN/DNS/reverse proxy/cert) is actually broken — the "alive but wedged" failure class, where an internal health-port check stays green for days while customers see errors | CR-A079-15, direct response to the same audit's finding that Mahmoud's `app-deploy.yml`/`deploy.yml` explicitly smoke-test the public hostname post-deploy, plus this org's own `feedback_alive_but_wedged_supervise_the_service.md` lesson. Live-proven both directions in this CR's `self-test.yml` (`post-deploy-smoke-pass` vs `https://example.com`, 200) / `self-test-red-path.yml` (`post-deploy-smoke-fail` vs `https://httpstat.us/404`, expecting 200 — fails loudly). |
 
 ## Gates NOT extracted (explicitly out of scope, per CR-A079-8)
 
@@ -57,6 +59,37 @@ Per CR-A079-8's QA Scenarios:
 4. **README-only adoption** — CR-A079-11 (Cairo, no pre-existing `.github/`
    at all) is the live test that a fresh agent can wire a new product from
    this README alone.
+
+## Live QA proof (CR-A079-15)
+
+Per CR-A079-15's QA Scenarios:
+
+1. **build-push-sha contract, mocked push** — proven live via
+   `build-push-sha-contract` (`self-test.yml`): `scripts/resolve-image-uri.sh`
+   run directly against fixture inputs (bare repo name AND a pre-qualified
+   repo URI), asserted against the exact expected `<repo>:<sha>` output, plus
+   a local `docker/build-push-action` run (`push: false`) against
+   `self-test/fixtures/build-push-sha/Dockerfile` proving the build leg. No
+   AWS/ECR call is made — the real workflow's OIDC role-assume + ECR login +
+   `push: true` steps require live credentials this self-test does not have
+   and must not fake.
+2. **mutable-tag invariant, with positive control** — proven live via
+   `build-push-sha-tag-invariant` (`self-test.yml`): the real file's
+   `docker/build-push-action` `tags:` block has 0 `latest` matches, AND a
+   scratch copy with one planted is confirmed caught (then discarded) — so
+   the check is proven to actually work, not just to pass vacuously.
+3. **smoke vs example.com (200) / smoke vs known-404 expecting 200** —
+   proven live via `post-deploy-smoke-pass` (`self-test.yml`, real
+   `https://example.com`, PASS) and `post-deploy-smoke-fail`
+   (`self-test-red-path.yml`, `https://httpstat.us/404` with
+   `expected_status: "200"`, FAILS loudly after the configured retries).
+4. **`git diff --stat` vs main — only allowlisted files** — see the
+   CR-A079-15 forge report for the actual diffstat output; the 16
+   pre-existing workflow files stay byte-identical except `self-test.yml`
+   and `self-test-red-path.yml` (both extended, not rewritten).
+5. **actionlint + yamllint clean** — see the CR-A079-15 forge report for
+   the local run output against every workflow file including the two new
+   ones.
 5. **`exclude_globs` (CR-A079-14 Part O / F4)** — proven live via
    `secret-detection-exclude-globs-pass` (`self-test.yml`) and
    `secret-detection-exclude-globs-still-blocks-fail`
